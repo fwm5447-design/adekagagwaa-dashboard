@@ -20,9 +20,14 @@ import StatusPill from '../primitives/StatusPill';
 export default function DataCompleteness({ rows = [], freshness }) {
   // We aggregate to (source, variant, target_date) — the per-city
   // detail is too granular for the dashboard heatmap.  Each cell
-  // gets the worst health_status across its cities.
+  // tracks per-status city counts, and renders by ok-fraction
+  // coverage rather than worst-of (which collapsed almost every
+  // cell to non-ok at typical 30-40% city-level ok rates).
+  // PATCHER_2026_05_06_COMPLETENESS_COVERAGE
   const grid = useMemo(() => {
-    const cells = new Map(); // key: `${src}|${variant}|${date}` → {status, n}
+    const cells = new Map();
+    // key: `${src}|${variant}|${date}` →
+    //   { ok, stale, missing, unknown, total, last_fetched }
     const sourceVariants = new Set();
     const targetDates = new Set();
     for (const r of rows) {
@@ -34,10 +39,17 @@ export default function DataCompleteness({ rows = [], freshness }) {
       sourceVariants.add(sv);
       targetDates.add(date);
       const key = `${sv}|${date}`;
-      const current = cells.get(key) || { worst: 'ok', n: 0, last_fetched: null };
+      const current = cells.get(key) || {
+        ok: 0, stale: 0, missing: 0, unknown: 0, total: 0,
+        last_fetched: null,
+      };
       const status = String(r.health_status || 'unknown');
-      current.worst = worseOf(current.worst, status);
-      current.n += 1;
+      if (status === 'ok' || status === 'stale' || status === 'missing') {
+        current[status] += 1;
+      } else {
+        current.unknown += 1;
+      }
+      current.total += 1;
       const lf = r.last_fetched_at ? new Date(r.last_fetched_at).getTime() : null;
       if (lf && (!current.last_fetched || lf > current.last_fetched)) {
         current.last_fetched = lf;
@@ -116,10 +128,10 @@ export default function DataCompleteness({ rows = [], freshness }) {
       </div>
 
       <div style={S.legend}>
-        <LegendChip status="ok" />
-        <LegendChip status="stale" />
-        <LegendChip status="missing" />
-        <LegendChip status="unknown" />
+        <CoverageLegendChip label="≥ 95% ok" fill={cellFillByOkFrac(1.00)} />
+        <CoverageLegendChip label="≥ 70% ok" fill={cellFillByOkFrac(0.80)} />
+        <CoverageLegendChip label="≥ 40% ok" fill={cellFillByOkFrac(0.50)} />
+        <CoverageLegendChip label="< 40% ok" fill={cellFillByOkFrac(0.10)} />
       </div>
     </SectionFrame>
   );
@@ -135,13 +147,22 @@ function Row({ src, variant, dates, cells, sv }) {
       {dates.map((d) => {
         const key = `${sv}|${d}`;
         const cell = cells.get(key);
-        if (!cell) {
+        if (!cell || cell.total === 0) {
           return (
             <div key={d} style={{ ...S.heatCell, background: 'var(--ink-mid)' }} title="no data" />
           );
         }
-        const fill = cellFill(cell.worst);
-        const tooltip = `${src}${variant ? ' · ' + variant : ''} · ${d}\nstatus: ${cell.worst}\ncities: ${cell.n}`;
+        const okFrac = cell.ok / cell.total;
+        const fill = cellFillByOkFrac(okFrac);
+        const pctText = `${Math.round(okFrac * 100)}%`;
+        const lines = [
+          `${src}${variant ? ' · ' + variant : ''} · ${d}`,
+          `ok: ${cell.ok}/${cell.total}  (${pctText})`,
+        ];
+        if (cell.stale > 0)   lines.push(`stale: ${cell.stale}`);
+        if (cell.missing > 0) lines.push(`missing: ${cell.missing}`);
+        if (cell.unknown > 0) lines.push(`unknown: ${cell.unknown}`);
+        const tooltip = lines.join('\n');
         return (
           <div
             key={d}
@@ -166,6 +187,18 @@ function LegendChip({ status }) {
   );
 }
 
+function CoverageLegendChip({ label, fill }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+      <span style={{
+        width: 14, height: 14, background: fill, borderRadius: 2,
+        border: '1px solid var(--rule-faint)',
+      }} />
+      <span className="eyebrow" style={{ color: 'var(--cloud-pearl)' }}>{label}</span>
+    </span>
+  );
+}
+
 function Tile({ label, value, tone = 'neutral' }) {
   const valueColor =
     tone === 'positive' ? 'var(--dawn-gold)'
@@ -182,18 +215,22 @@ function Tile({ label, value, tone = 'neutral' }) {
   );
 }
 
-// Status ordering: missing > stale > unknown > ok (worst wins for cell color)
-function worseOf(a, b) {
-  const order = { ok: 0, unknown: 1, stale: 2, missing: 3 };
-  const aN = order[a] ?? 1;
-  const bN = order[b] ?? 1;
-  return aN >= bN ? a : b;
+// Coverage-percentage cell color.  Replaces worseOf() / cellFill()
+// — see useMemo aggregation comment for rationale.
+function cellFillByOkFrac(okFrac) {
+  if (okFrac >= 0.95) return 'var(--forest-veil)';                 // solid green
+  if (okFrac >= 0.70) return 'rgba(94, 138, 89, 0.55)';            // faded green
+  if (okFrac >= 0.40) return 'rgba(184, 133, 58, 0.45)';           // amber
+  return 'rgba(194, 84, 80, 0.45)';                                 // red
 }
 
+// Kept for the legend chips below — they map a label string to a
+// representative fill.  Coverage bands are defined here so the
+// legend and cellFillByOkFrac stay in sync.
 function cellFill(status) {
   if (status === 'ok')      return 'var(--forest-veil)';
-  if (status === 'stale')   return 'rgba(184, 133, 58, 0.32)';
-  if (status === 'missing') return 'rgba(194, 84, 80, 0.32)';
+  if (status === 'stale')   return 'rgba(184, 133, 58, 0.45)';
+  if (status === 'missing') return 'rgba(194, 84, 80, 0.45)';
   return 'rgba(245, 241, 232, 0.06)';
 }
 
