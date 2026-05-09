@@ -5,8 +5,8 @@
  *
  * Replaces the 2026-04 monolithic single-file dashboard with a thin
  * orchestrator that fetches /api/dashboard once on mount + every 60s
- * thereafter, and distributes sections.* into the ten section
- * components that already live in the repo.
+ * thereafter, and distributes sections.* into the section components
+ * that live in components/sections/.
  *
  * Auth: middleware.js gates every /api/dashboard request via the
  * HTTP-only signed JWT cookie.  We send `credentials: 'include'` so
@@ -14,20 +14,21 @@
  * /login so the user can re-auth.
  *
  * Section composition (top → bottom):
- *   1.  WeatherMap         — geographic surface for the 20 markets
- *   2.  Oracle             — calibration deciles
- *   3.  TributaryEnsemble  — per-source skill
- *   4.  DecisionsRendered  — signal funnel
- *   5.  RealizedEdge       — P&L attribution (3 tiers)
- *   6.  Vigil              — calibration-stack internals (3 panels)
- *   7.  DataCompleteness   — data-gap monitor
+ *   0.  Bankroll          — top-of-page P&L tracker (NEW 2026-05-09)
+ *   1.  WeatherMap        — geographic surface for the 20 markets
+ *   2.  Oracle            — calibration deciles
+ *   3.  TributaryEnsemble — per-source skill
+ *   4.  DecisionsRendered — signal funnel
+ *   5.  RealizedEdge      — P&L attribution (3 tiers)
+ *   6.  Vigil             — calibration-stack internals (3 panels)
+ *   7.  DataCompleteness  — data-gap monitor
  *   8.  ClosingLineCoverage — CLV capture rate
- *   9.  OperationalPulse   — API health
- *  10.  TradeLedger        — trade history (bottom — densest)
+ *   9.  OperationalPulse  — API health
+ *  10.  TradeLedger       — trade history (bottom — densest)
  *
  * Each section component contracts on either:
  *   * `rows` (most sections — flat array of MV rows)
- *   * `data` (Vigil, RealizedEdge, WeatherMap — structured payload)
+ *   * `data` (Vigil, RealizedEdge, WeatherMap, Bankroll — structured)
  * plus a `freshness` timestamp.  See lib/queries.js SECTION_QUERIES
  * for the slug → component mapping.
  */
@@ -36,6 +37,7 @@ import { useEffect, useState } from 'react';
 
 // Section components — paths use the @/* alias from jsconfig.json
 // pointing at the project root.
+import Bankroll            from '@/components/sections/Bankroll';
 import WeatherMap          from '@/components/sections/WeatherMap';
 import Oracle              from '@/components/sections/Oracle';
 import TributaryEnsemble   from '@/components/sections/TributaryEnsemble';
@@ -48,7 +50,7 @@ import OperationalPulse    from '@/components/sections/OperationalPulse';
 import TradeLedger         from '@/components/sections/TradeLedger';
 
 
-// ─── Data-fetching hook ─────────────────────────────────────────────
+// ─── Data-fetching hook ─────────────────────────────────────────
 function useDashboardPayload() {
   const [payload,   setPayload]   = useState(null);
   const [error,     setError]     = useState(null);
@@ -65,7 +67,6 @@ function useDashboardPayload() {
           cache: 'no-store',
         });
         if (res.status === 401) {
-          // Session expired — bounce to login with return-path.
           if (typeof window !== 'undefined') {
             const here = encodeURIComponent(window.location.pathname);
             window.location.href = `/login?from=${here}`;
@@ -81,14 +82,13 @@ function useDashboardPayload() {
       } catch (e) {
         if (cancelled) return;
         setError(String(e?.message || e));
-        // Keep prior payload on screen — a 60s blip shouldn't blank the UI.
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
 
     tick();
-    const id = setInterval(tick, 60_000);   // align with route handler edge cache
+    const id = setInterval(tick, 60_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
@@ -96,7 +96,7 @@ function useDashboardPayload() {
 }
 
 
-// ─── Loading / error states ─────────────────────────────────────────
+// ─── Loading / error states ─────────────────────────────────────
 function SplashScreen({ kind, message }) {
   return (
     <div style={S.splash}>
@@ -112,7 +112,7 @@ function SplashScreen({ kind, message }) {
 }
 
 
-// ─── Main orchestrator ──────────────────────────────────────────────
+// ─── Main orchestrator ──────────────────────────────────────────
 export default function Dashboard() {
   const { payload, error, loading, lastFetch } = useDashboardPayload();
 
@@ -133,12 +133,6 @@ export default function Dashboard() {
   const meta     = payload.meta     || {};
   const fresh    = (slug) => meta?.freshness?.[slug];
 
-  // Live market state from the v1 pass-through, when available.  The
-  // shape is whatever dashboard_export.py writes to data/dashboard.json.
-  // We extract per-city {high, low}: { yes_bid, yes_ask, threshold }
-  // for WeatherMap's MARKET / EDGE modes.  When the v1 payload is
-  // missing or malformed, both stay null and the map renders graceful
-  // empty states for those modes.
   const mapMarkets    = extractLiveMarkets(payload);
   const mapThresholds = extractThresholds(payload);
 
@@ -152,6 +146,15 @@ export default function Dashboard() {
       />
 
       <div style={S.sectionStack}>
+
+        {/* 0. Bankroll — headline P&L tracker (top of stack) */}
+        <Bankroll
+          data={{
+            summary: (sections.bankroll_summary && sections.bankroll_summary[0]) || null,
+            curve:    sections.bankroll_curve || [],
+          }}
+          freshness={fresh('bankroll_summary')}
+        />
 
         {/* 1. Geographic anchor */}
         <WeatherMap
@@ -180,8 +183,8 @@ export default function Dashboard() {
         {/* 5. P&L attribution (3-tier — pure, pipeline, closing-line) */}
         <RealizedEdge
           data={{
-            rows:             sections.attribution        || [],
-            realized_summary: sections.realized_summary   || [],
+            rows:             sections.attribution      || [],
+            realized_summary: sections.realized_summary || [],
             pipeline_counts:  (sections.pipeline_counts && sections.pipeline_counts[0]) || null,
           }}
           freshness={fresh('attribution')}
@@ -224,7 +227,7 @@ export default function Dashboard() {
 }
 
 
-// ─── Header ─────────────────────────────────────────────────────────
+// ─── Header ─────────────────────────────────────────────────────
 function Header({ generatedAt, lastFetch, error, v1Error }) {
   return (
     <header style={S.header}>
@@ -257,7 +260,7 @@ function Header({ generatedAt, lastFetch, error, v1Error }) {
 }
 
 
-// ─── Footer ─────────────────────────────────────────────────────────
+// ─── Footer ─────────────────────────────────────────────────────
 function Footer({ payload }) {
   const errors = payload?.meta?.analytics_errors || {};
   const errorEntries = Object.entries(errors);
@@ -286,18 +289,11 @@ function Footer({ payload }) {
 }
 
 
-// ─── Live-market extraction helpers ─────────────────────────────────
-//
-// dashboard_export.py writes per-city open-position records to
-// data/dashboard.json.  Shape is best-effort — different versions of
-// the exporter wrote slightly different field names.  We try the most
-// common shapes and fall through to null if nothing matches.
-
+// ─── Live-market extraction helpers ─────────────────────────────
 function extractLiveMarkets(payload) {
   const v1 = payload?.v1?.payload;
   if (!v1) return null;
 
-  // Most likely: open_positions array of { city, market_type, market_yes_bid, ... }
   const positions = v1.open_positions || v1.positions || null;
   if (!Array.isArray(positions) || positions.length === 0) return null;
 
@@ -330,7 +326,7 @@ function extractThresholds(payload) {
 }
 
 
-// ─── Styles ─────────────────────────────────────────────────────────
+// ─── Styles ─────────────────────────────────────────────────────
 const S = {
   page: {
     minHeight: '100vh',
