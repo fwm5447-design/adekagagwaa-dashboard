@@ -21,11 +21,12 @@
  *                              → isotonic → station biases).  Replaced
  *                              TributaryEnsemble + Vigil 2026-05-15.
  *   4.  DecisionsRendered    — signal funnel
- *   5.  RealizedEdge         — P&L attribution (3 tiers)
+ *   5.  EdgeAndAttribution   — realized P&L + closing-line capture +
+ *                              attribution pipeline (4 tiers).  Replaced
+ *                              RealizedEdge + ClosingLineCoverage 2026-05-15.
  *   6.  DataCompleteness     — data-gap monitor
- *   7.  ClosingLineCoverage  — CLV capture rate
- *   8.  OperationalPulse     — API health
- *   9.  TradeLedger          — trade history (bottom — densest)
+ *   7.  OperationalPulse     — API health
+ *   8.  TradeLedger          — trade history (bottom — densest)
  *
  * Each section component contracts on either:
  *   * `rows` (most sections — flat array of MV rows)
@@ -43,9 +44,8 @@ import WeatherMap          from '@/components/sections/WeatherMap';
 import Oracle              from '@/components/sections/Oracle';
 import CalibrationPipeline from '@/components/sections/CalibrationPipeline';
 import DecisionsRendered   from '@/components/sections/DecisionsRendered';
-import RealizedEdge        from '@/components/sections/RealizedEdge';
+import EdgeAndAttribution  from '@/components/sections/EdgeAndAttribution';
 import DataCompleteness    from '@/components/sections/DataCompleteness';
-import ClosingLineCoverage from '@/components/sections/ClosingLineCoverage';
 import OperationalPulse    from '@/components/sections/OperationalPulse';
 import TradeLedger         from '@/components/sections/TradeLedger';
 
@@ -189,24 +189,21 @@ export default function Dashboard() {
           freshness={fresh('signals')}
         />
 
-        {/* 5. P&L attribution (3-tier — pure, pipeline, closing-line) */}
-        <RealizedEdge
+        {/* 5. Realized P&L + closing-line capture + attribution pipeline */}
+        <EdgeAndAttribution
           data={{
-            rows:             sections.attribution      || [],
             realized_summary: sections.realized_summary || [],
+            coverage:         sections.coverage         || [],
             pipeline_counts:  (sections.pipeline_counts && sections.pipeline_counts[0]) || null,
+            attribution:      sections.attribution      || [],
           }}
           freshness={fresh('attribution')}
         />
 
-        {/* 7-9. Data + ops health */}
+        {/* 6-7. Data + ops health */}
         <DataCompleteness
           rows={sections.completeness || []}
           freshness={fresh('completeness')}
-        />
-        <ClosingLineCoverage
-          rows={sections.coverage || []}
-          freshness={fresh('coverage')}
         />
         <OperationalPulse
           rows={sections.health || []}
