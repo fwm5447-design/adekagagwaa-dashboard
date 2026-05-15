@@ -18,6 +18,17 @@ import StatusPill from '../primitives/StatusPill';
  *   - Sources that have been silently absent for hours
  */
 export default function DataCompleteness({ rows = [], freshness }) {
+  // PATCHER_2026_05_15_PAST_TARGET_NEUTRAL — anchor date for "is this
+  // target_date in the past?".  We use the dashboard tab's wall clock
+  // (UTC date) — close enough to the bot's behavior, and avoids a
+  // round-trip just for `today`.  Past target_dates can't be re-fetched
+  // (the day is over) so freshness ≠ health for them; they get a
+  // neutral palette instead of the alarming red/amber.
+  const todayUTC = useMemo(
+    () => new Date().toISOString().slice(0, 10),
+    [],
+  );
+
   // We aggregate to (source, variant, target_date) — the per-city
   // detail is too granular for the dashboard heatmap.  Each cell
   // tracks per-status city counts, and renders by ok-fraction
@@ -61,17 +72,26 @@ export default function DataCompleteness({ rows = [], freshness }) {
     return { cells, sortedDates, sortedSources };
   }, [rows]);
 
-  // Aggregate counts.
+  // Aggregate counts — PATCHER_2026_05_15_PAST_TARGET_NEUTRAL excludes
+  // past target_dates from the ok/stale/missing tiles since those are
+  // historical and can't be re-fetched.  Past rows are surfaced
+  // separately as `historical` so the tile bar doesn't scare on
+  // expected-stale data.
   const counts = useMemo(() => {
-    const by = { ok: 0, stale: 0, missing: 0, unknown: 0 };
+    const by = { ok: 0, stale: 0, missing: 0, unknown: 0, historical: 0 };
     for (const r of rows) {
+      const d = String(r.target_date || '').slice(0, 10);
+      if (todayUTC && d && d < todayUTC) {
+        by.historical += 1;
+        continue;
+      }
       const s = String(r.health_status || 'unknown');
       if (by[s] != null) by[s] += 1;
       else by.unknown += 1;
     }
     const total = rows.length;
     return { ...by, total };
-  }, [rows]);
+  }, [rows, todayUTC]);
 
   return (
     <SectionFrame
@@ -82,12 +102,13 @@ export default function DataCompleteness({ rows = [], freshness }) {
       freshnessAt={freshness}
       freshnessCadenceSec={3600}
     >
-      {/* Aggregate tile row */}
+      {/* Aggregate tile row — past target_dates excluded from
+          ok/stale/missing (they're shown in 'historical' instead). */}
       <div style={S.tileGrid}>
-        <Tile label="ok"      value={fmtInt(counts.ok)}      tone="positive" />
-        <Tile label="stale"   value={fmtInt(counts.stale)}   tone="warning" />
-        <Tile label="missing" value={fmtInt(counts.missing)} tone="negative" />
-        <Tile label="unknown" value={fmtInt(counts.unknown)} tone="neutral" />
+        <Tile label="ok"         value={fmtInt(counts.ok)}         tone="positive" />
+        <Tile label="stale"      value={fmtInt(counts.stale)}      tone="warning" />
+        <Tile label="missing"    value={fmtInt(counts.missing)}    tone="negative" />
+        <Tile label="historical" value={fmtInt(counts.historical)} tone="neutral" />
       </div>
 
       {/* Heatmap grid */}
@@ -120,6 +141,7 @@ export default function DataCompleteness({ rows = [], freshness }) {
                   dates={grid.sortedDates}
                   cells={grid.cells}
                   sv={sv}
+                  todayUTC={todayUTC}
                 />
               );
             })}
@@ -132,12 +154,13 @@ export default function DataCompleteness({ rows = [], freshness }) {
         <CoverageLegendChip label="≥ 70% ok" fill={cellFillByOkFrac(0.80)} />
         <CoverageLegendChip label="≥ 40% ok" fill={cellFillByOkFrac(0.50)} />
         <CoverageLegendChip label="< 40% ok" fill={cellFillByOkFrac(0.10)} />
+        <CoverageLegendChip label="closed (past target)" fill={cellFillClosed()} />
       </div>
     </SectionFrame>
   );
 }
 
-function Row({ src, variant, dates, cells, sv }) {
+function Row({ src, variant, dates, cells, sv, todayUTC }) {
   return (
     <>
       <div style={S.rowLabel}>
@@ -153,15 +176,21 @@ function Row({ src, variant, dates, cells, sv }) {
           );
         }
         const okFrac = cell.ok / cell.total;
-        const fill = cellFillByOkFrac(okFrac);
         const pctText = `${Math.round(okFrac * 100)}%`;
+        // PATCHER_2026_05_15_PAST_TARGET_NEUTRAL — past target_dates
+        // can't be re-fetched (the day is closed); freshness ≠ health.
+        // Render them with a neutral palette + "(closed)" tooltip
+        // instead of the actionable red/amber.
+        const isPast = todayUTC && d < todayUTC;
+        const fill = isPast ? cellFillClosed() : cellFillByOkFrac(okFrac);
         const lines = [
-          `${src}${variant ? ' · ' + variant : ''} · ${d}`,
+          `${src}${variant ? ' · ' + variant : ''} · ${d}` + (isPast ? ' (closed)' : ''),
           `ok: ${cell.ok}/${cell.total}  (${pctText})`,
         ];
         if (cell.stale > 0)   lines.push(`stale: ${cell.stale}`);
         if (cell.missing > 0) lines.push(`missing: ${cell.missing}`);
         if (cell.unknown > 0) lines.push(`unknown: ${cell.unknown}`);
+        if (isPast)           lines.push('(past target — staleness is expected)');
         const tooltip = lines.join('\n');
         return (
           <div
@@ -222,6 +251,15 @@ function cellFillByOkFrac(okFrac) {
   if (okFrac >= 0.70) return 'rgba(94, 138, 89, 0.55)';            // faded green
   if (okFrac >= 0.40) return 'rgba(184, 133, 58, 0.45)';           // amber
   return 'rgba(194, 84, 80, 0.45)';                                 // red
+}
+
+// PATCHER_2026_05_15_PAST_TARGET_NEUTRAL — past target_dates use this
+// fill regardless of their current ok/stale ratio.  Once a day has
+// passed the bot can't re-fetch its forecasts, so MV staleness is
+// guaranteed and not actionable.  Neutral grey signals "historical /
+// closed" without screaming red.
+function cellFillClosed() {
+  return 'rgba(245, 241, 232, 0.10)';                               // soft grey
 }
 
 // Kept for the legend chips below — they map a label string to a
