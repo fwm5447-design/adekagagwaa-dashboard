@@ -6,41 +6,35 @@ import { feature, mesh } from 'topojson-client';
 import SectionFrame from '../layout/SectionFrame';
 
 /**
- * WeatherMap — twenty cities, four+ views, one atmosphere.
+ * WeatherMap — twenty cities and the atmosphere above them.
  *
- * Each market we trade gets a marker on the US map.  Mode pills
- * change what each marker is colored and labeled by:
+ * Each tracked market gets a marker on the US map.  Each marker shows
+ * a weather glyph (sun / cloud / storm / snow / heat) derived from
+ * the forecast's μ and σ — so the map reads as weather first, data
+ * second.  The active mode (Forecast / Spread / Market / Marine /
+ * Edge) overlays a value label below the glyph.
  *
- *   FORECAST — today's HIGH/LOW μ from the latest forecast cycle.
- *              Cool blue (cold) → ivory → warm gold (hot).
- *   SPREAD   — predictive σ.  Serene blue (agreement) →
- *              storm violet (disagreement = likely mispricing).
- *   MARKET   — Kalshi yes-mid for the active threshold.
- *              Coral 0¢ → ivory 50¢ → gold 100¢.
- *   MARINE   — coastal cities only; inland greyed.  Marine-layer
- *              data plumbed in v2.
- *   EDGE     — |μ − threshold| heatmap when thresholds are
- *              available; falls back to σ when not.
- *
- * Topology: us-atlas@3 states-10m.json from jsDelivr (~80KB,
- * browser-cached).  d3-geo's geoAlbersUsa handles AK/HI insets
- * gracefully even though we have no cities there.
+ * Modes:
+ *   FORECAST — today's HIGH / LOW μ from the latest forecast cycle.
+ *              Cool blue → ivory → warm gold halo.
+ *   SPREAD   — predictive σ.  Calm halo → storm-violet halo.
+ *   MARKET   — Kalshi yes-mid for the at-the-money strike.  Pulls
+ *              from analytics.v_map_market_today so every city
+ *              renders, not just the ones we hold positions on.
+ *   MARINE   — coastal cities only; inland greyed out.
+ *   EDGE     — |μ − threshold|.  Largest gaps light up gold.
  *
  * Data shape (passed via the `data` prop):
- *
  *   {
  *     forecasts: [{ city, market_type, mu_cal, sigma_cal,
- *                   q10, q50, q90, n_sources, target_date,
- *                   generated_at, ... }, ...],
- *     markets:   { [city]: { high|low: { yes_bid, yes_ask, threshold } } },
+ *                   q10, q50, q90, n_sources, target_date, ... }],
+ *     markets:   { [city]: { high|low: { yes_bid, yes_ask, yes_mid,
+ *                                        strike, threshold, ticker } } },
  *     thresholds:{ [city]: { high|low: number } }
  *   }
- *
- * forecasts is required.  markets and thresholds are optional;
- * when missing, MARKET/EDGE modes show graceful "—" states.
  */
 
-// ─── 20 ASOS-anchored city coordinates (from core/cities.py) ────────
+// ─── 20 ASOS-anchored city coordinates (mirrors core/cities.py) ──────
 const CITIES = [
   { name: 'New York',      asos: 'KNYC', lat: 40.7789, lon:  -73.9692, marine: true  },
   { name: 'Los Angeles',   asos: 'KLAX', lat: 33.9425, lon: -118.4081, marine: true  },
@@ -65,20 +59,22 @@ const CITIES = [
 ];
 
 const TOPO_URL = 'https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json';
-const MAP_W = 960;
-const MAP_H = 600;
+const MAP_W = 1280;
+const MAP_H = 760;
+const MARKER_R = 26;       // marker radius
+const GLYPH_SIZE = 32;     // weather glyph size inside marker
 
 const MODES = [
-  { id: 'forecast', label: 'Forecast', caption: "today's μ from the latest cycle" },
+  { id: 'forecast', label: 'Forecast', caption: "today's μ from the latest forecast cycle" },
   { id: 'spread',   label: 'Spread',   caption: 'σ across the active ensemble' },
-  { id: 'market',   label: 'Market',   caption: 'Kalshi yes-mid for the active threshold' },
-  { id: 'marine',   label: 'Marine',   caption: 'coastal cities only · marine-layer plumbing in v2' },
+  { id: 'market',   label: 'Market',   caption: 'Kalshi yes-mid for the at-the-money strike' },
+  { id: 'marine',   label: 'Marine',   caption: 'coastal cities only · σ proxy for marine layer' },
   { id: 'edge',     label: 'Edge',     caption: '|μ − threshold| heat · largest gaps light up' },
 ];
 
 
 export default function WeatherMap({ data, freshness }) {
-  const forecasts  = data?.forecasts  || [];
+  const forecasts  = useMemo(() => data?.forecasts || [], [data?.forecasts]);
   const markets    = data?.markets    || null;
   const thresholds = data?.thresholds || null;
 
@@ -105,7 +101,7 @@ export default function WeatherMap({ data, freshness }) {
 
   // Projection + path generator — stable across renders
   const { projection, pathGen } = useMemo(() => {
-    const proj = geoAlbersUsa().scale(1280).translate([MAP_W / 2, MAP_H / 2]);
+    const proj = geoAlbersUsa().scale(1700).translate([MAP_W / 2, MAP_H / 2 - 20]);
     return { projection: proj, pathGen: geoPath(proj) };
   }, []);
 
@@ -129,51 +125,47 @@ export default function WeatherMap({ data, freshness }) {
     return projected.map((c) => {
       const fcst = byCityMt.get(`${c.name}::${marketType}`);
       const mkt  = markets?.[c.name]?.[marketType] ?? null;
-      const thr  = thresholds?.[c.name]?.[marketType] ?? null;
+      const thr  = thresholds?.[c.name]?.[marketType] ?? mkt?.threshold ?? mkt?.strike ?? null;
+      const mu    = fcst && Number.isFinite(Number(fcst.mu_cal))    ? Number(fcst.mu_cal)    : null;
+      const sigma = fcst && Number.isFinite(Number(fcst.sigma_cal)) ? Number(fcst.sigma_cal) : null;
 
       let value = null, label = '—', active = true;
 
       switch (mode) {
         case 'forecast':
-          if (fcst && Number.isFinite(Number(fcst.mu_cal))) {
-            value = Number(fcst.mu_cal);
-            label = `${value.toFixed(0)}°`;
-          }
+          if (mu != null) { value = mu; label = `${mu.toFixed(0)}°`; }
           break;
         case 'spread':
-          if (fcst && Number.isFinite(Number(fcst.sigma_cal))) {
-            value = Number(fcst.sigma_cal);
-            label = value.toFixed(1);
-          }
+          if (sigma != null) { value = sigma; label = sigma.toFixed(1); }
           break;
-        case 'market':
-          if (mkt && (mkt.yes_bid != null || mkt.yes_ask != null)) {
-            const a = Number(mkt.yes_bid) || 0;
-            const b = Number(mkt.yes_ask) || 0;
-            const mid = (a + b) / 2;
+        case 'market': {
+          const mid = mkt?.yes_mid != null
+            ? Number(mkt.yes_mid)
+            : (mkt && (mkt.yes_bid != null || mkt.yes_ask != null)
+                ? (Number(mkt.yes_bid ?? 0) + Number(mkt.yes_ask ?? 0)) / 2
+                : null);
+          if (mid != null && Number.isFinite(mid)) {
             value = mid;
-            label = `${(mid * 100).toFixed(0)}¢`;
+            label = `${Math.round(mid * 100)}¢`;
           }
           break;
+        }
         case 'marine':
           active = c.marine;
           if (!active) { value = null; label = '·'; }
-          else if (fcst && Number.isFinite(Number(fcst.sigma_cal))) {
-            value = Number(fcst.sigma_cal);
-            label = value.toFixed(1);
-          }
+          else if (sigma != null) { value = sigma; label = sigma.toFixed(1); }
           break;
         case 'edge':
-          if (fcst && thr != null && Number.isFinite(Number(fcst.mu_cal))) {
-            value = Math.abs(Number(fcst.mu_cal) - Number(thr));
+          if (mu != null && thr != null) {
+            value = Math.abs(mu - Number(thr));
             label = `${value.toFixed(1)}°`;
-          } else if (fcst && Number.isFinite(Number(fcst.sigma_cal))) {
-            value = Number(fcst.sigma_cal);
-            label = `~${value.toFixed(1)}`;
+          } else if (sigma != null) {
+            value = sigma;
+            label = `~${sigma.toFixed(1)}`;
           }
           break;
       }
-      return { ...c, value, label, active, fcst, mkt, thr };
+      return { ...c, value, label, active, mu, sigma, fcst, mkt, thr };
     });
   }, [projected, byCityMt, markets, thresholds, mode, marketType]);
 
@@ -186,92 +178,63 @@ export default function WeatherMap({ data, freshness }) {
     return { min: Math.min(...vals), max: Math.max(...vals), hasRange: true };
   }, [cityValues]);
 
-  // Color picker per mode
-  function colorFor(c) {
+  // Color picker per mode (halo tone)
+  function haloColor(c) {
     if (!c.active || c.value == null || !Number.isFinite(c.value)) {
-      return { fill: 'var(--ink-mid)', stroke: 'var(--rule-mid)', text: 'var(--cloud-mute)' };
+      return 'rgba(245, 241, 232, 0.10)';
     }
     const t = valueRange.hasRange
       ? (c.value - valueRange.min) / Math.max(0.0001, valueRange.max - valueRange.min)
       : 0.5;
-    if (mode === 'forecast')              return ramp3(t, [38, 85, 130], [220, 215, 195], [212, 169, 60]);
-    if (mode === 'spread' || mode === 'marine') return ramp2(t, [38, 85, 130], [126, 79, 168]);
-    if (mode === 'market')                return ramp3(Math.max(0, Math.min(1, c.value)),
-                                                       [186, 78, 88], [220, 215, 195], [212, 169, 60]);
-    if (mode === 'edge')                  return ramp2(t, [60, 70, 90], [212, 169, 60]);
-    return { fill: 'var(--cloud-pearl)', stroke: 'var(--rule-mid)', text: 'var(--ink-deep)' };
+    if (mode === 'forecast')                     return ramp3rgba(t, [38, 85, 130, 0.55], [220, 215, 195, 0.45], [212, 169, 60, 0.65]);
+    if (mode === 'spread' || mode === 'marine')  return ramp2rgba(t, [38, 85, 130, 0.45], [126, 79, 168, 0.7]);
+    if (mode === 'market')                       return ramp3rgba(Math.max(0, Math.min(1, c.value)),
+                                                                  [186, 78, 88, 0.55], [220, 215, 195, 0.45], [212, 169, 60, 0.65]);
+    if (mode === 'edge')                         return ramp2rgba(t, [60, 70, 90, 0.35], [212, 169, 60, 0.75]);
+    return 'rgba(245, 241, 232, 0.10)';
   }
 
   // Drift cumulus particles — built once, deterministic positions
-  const driftParticles = useMemo(() => buildDrift(18), []);
+  const driftParticles = useMemo(() => buildDrift(22), []);
 
   return (
     <SectionFrame
       id="weather-map"
       invocation="The Atmosphere"
       title="The Atmosphere"
-      subtitle="Twenty cities and the air above them.  Pick a lens and the cities re-color — what the model is forecasting, where it's uncertain, where Kalshi disagrees, where the marine layer presses inland."
+      subtitle="Twenty cities and the air above them.  Each marker reads as weather first — sun for clear, cloud for cover, storm where the model can&rsquo;t agree, snow where it&rsquo;s cold.  Pick a lens and the value below the glyph re-renders."
       freshnessAt={freshness}
       freshnessCadenceSec={300}
     >
-      {/* Mode + market_type controls */}
-      <div style={S.controlRow}>
-        <div style={S.pillRow}>
-          {MODES.map((m) => (
-            <button
-              key={m.id}
-              onClick={() => setMode(m.id)}
-              style={{ ...S.pill, ...(mode === m.id ? S.pillActive : null) }}
-              aria-pressed={mode === m.id}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-        <div style={S.toggleGroup}>
-          <button onClick={() => setMarketType('high')}
-                  style={{ ...S.miniPill, ...(marketType === 'high' ? S.miniPillActive : null) }}
-                  aria-pressed={marketType === 'high'}>HIGH</button>
-          <button onClick={() => setMarketType('low')}
-                  style={{ ...S.miniPill, ...(marketType === 'low' ? S.miniPillActive : null) }}
-                  aria-pressed={marketType === 'low'}>LOW</button>
-        </div>
-      </div>
-
-      <div className="numeric" style={S.modeCaption}>
-        {MODES.find((m) => m.id === mode)?.caption} · target_date {forecastTargetDate(forecasts) || '—'}
-      </div>
-
-      {/* Map */}
       <div style={S.mapShell}>
         <style>{driftKeyframes}</style>
         <svg viewBox={`0 0 ${MAP_W} ${MAP_H}`} style={S.mapSvg}
              role="img" aria-label="Weather map of 20 US cities"
              preserveAspectRatio="xMidYMid meet">
           <defs>
-            <radialGradient id="map-atmosphere" cx="50%" cy="55%" r="65%">
-              <stop offset="0%" stopColor="var(--ink-mid)" stopOpacity="0.6">
-                <animate attributeName="stop-opacity" values="0.6;0.85;0.6"
-                         dur="32s" repeatCount="indefinite" />
+            <radialGradient id="map-atmosphere" cx="50%" cy="50%" r="70%">
+              <stop offset="0%" stopColor="var(--ink-mid)" stopOpacity="0.55">
+                <animate attributeName="stop-opacity" values="0.55;0.78;0.55"
+                         dur="42s" repeatCount="indefinite" />
               </stop>
-              <stop offset="60%"  stopColor="var(--ink-deep)" stopOpacity="0.4" />
+              <stop offset="55%"  stopColor="var(--ink-deep)" stopOpacity="0.45" />
               <stop offset="100%" stopColor="var(--ink-deep)" stopOpacity="0.95" />
             </radialGradient>
             <filter id="map-particle-blur" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur stdDeviation="6" />
+              <feGaussianBlur stdDeviation="7" />
             </filter>
             <linearGradient id="state-fill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%"   stopColor="var(--ink-deep)" stopOpacity="0.05" />
-              <stop offset="100%" stopColor="var(--ink-deep)" stopOpacity="0.45" />
+              <stop offset="0%"   stopColor="var(--ink-deep)" stopOpacity="0.08" />
+              <stop offset="100%" stopColor="var(--ink-deep)" stopOpacity="0.5" />
             </linearGradient>
-            <filter id="marker-glow" x="-100%" y="-100%" width="300%" height="300%">
-              <feGaussianBlur stdDeviation="3.5" result="blur" />
-              <feComposite in="SourceGraphic" in2="blur" operator="over" />
+            <filter id="marker-halo" x="-150%" y="-150%" width="400%" height="400%">
+              <feGaussianBlur stdDeviation="6" />
             </filter>
           </defs>
 
           <rect x="0" y="0" width={MAP_W} height={MAP_H} fill="url(#map-atmosphere)" />
 
+          {/* Atmospheric drift particles — slow cumulus crossing the page */}
           <g style={{ mixBlendMode: 'screen' }}>
             {driftParticles.map((p, i) => (
               <circle key={i} cx={p.x} cy={p.y} r={p.r}
@@ -284,72 +247,125 @@ export default function WeatherMap({ data, freshness }) {
             ))}
           </g>
 
+          {/* US topology */}
           {topo && (
             <g>
               <path d={topo.states.features.map((f) => pathGen(f)).join(' ')}
                     fill="url(#state-fill)" stroke="none" />
               <path d={pathGen(topo.borders)} fill="none"
-                    stroke="var(--rule-faint)" strokeWidth="0.7"
-                    strokeOpacity="0.65" strokeLinejoin="round" />
+                    stroke="var(--rule-mid)" strokeWidth="0.8"
+                    strokeOpacity="0.6" strokeLinejoin="round" />
             </g>
           )}
           {!topo && !topoErr && (
             <text x={MAP_W / 2} y={MAP_H / 2} fill="var(--cloud-mute)"
                   textAnchor="middle"
-                  style={{ fontFamily: 'var(--font-display)', fontStyle: 'italic', fontSize: 14 }}>
+                  style={{ fontFamily: 'var(--font-display)', fontStyle: 'italic', fontSize: 16 }}>
               Loading topology…
             </text>
           )}
           {topoErr && (
             <text x={MAP_W / 2} y={MAP_H / 2} fill="var(--storm-violet)"
                   textAnchor="middle"
-                  style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                  style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>
               Topology load failed · {topoErr}
             </text>
           )}
 
-          {/* City markers */}
+          {/* City markers — weather glyphs */}
           <g>
             {cityValues.map((c) => {
               if (c.x == null || c.y == null) return null;
-              const col = colorFor(c);
-              const r = c.active ? 26 : 14;
+              const isHover = hover === c.name;
+              const halo = haloColor(c);
+              const weather = classifyWeather(c.mu, c.sigma);
               return (
                 <g key={c.name} transform={`translate(${c.x}, ${c.y})`}
                    onMouseEnter={() => setHover(c.name)}
                    onMouseLeave={() => setHover(null)}
                    style={{ cursor: 'pointer' }}>
+                  {/* Halo */}
                   {c.active && c.value != null && (
-                    <circle cx="0" cy="0" r={r + 6}
-                            fill={col.fill} opacity="0.28"
-                            filter="url(#marker-glow)" />
+                    <circle cx="0" cy="0" r={MARKER_R + 10}
+                            fill={halo}
+                            filter="url(#marker-halo)" />
                   )}
-                  <rect x={-r} y={-r * 0.55} width={r * 2} height={r * 1.1} rx={3}
-                        fill={col.fill} stroke={col.stroke} strokeWidth="0.8"
-                        opacity={c.active ? 1 : 0.4} />
-                  <text x="0" y="0" textAnchor="middle" dominantBaseline="middle"
-                        fill={col.text}
+                  {/* Marker disk */}
+                  <circle cx="0" cy="0" r={MARKER_R}
+                          fill="rgba(10, 14, 20, 0.78)"
+                          stroke={isHover ? 'var(--cloud-pearl)' : 'var(--rule-mid)'}
+                          strokeWidth={isHover ? 1.6 : 0.8}
+                          opacity={c.active ? 1 : 0.5} />
+                  {/* Weather glyph */}
+                  {c.active && (
+                    <g transform={`translate(0, -2) scale(${isHover ? 1.05 : 1})`}
+                       opacity={c.active ? 0.92 : 0.4}>
+                      <WeatherGlyph type={weather} size={GLYPH_SIZE} cityIdx={CITIES.findIndex((cc) => cc.name === c.name)} />
+                    </g>
+                  )}
+                  {/* Value label */}
+                  <text x="0" y={MARKER_R - 6} textAnchor="middle" dominantBaseline="middle"
+                        fill={c.active ? 'var(--cloud-pearl)' : 'var(--cloud-mute)'}
                         style={{
-                          fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 500,
-                          letterSpacing: '-0.02em', pointerEvents: 'none',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 12,
+                          fontWeight: 600,
+                          letterSpacing: '-0.02em',
+                          pointerEvents: 'none',
                         }}>
                     {c.label}
                   </text>
-                  <text x="0" y={r * 0.55 + 11} textAnchor="middle"
-                        fill="var(--cloud-haze)"
-                        style={{
-                          fontFamily: 'var(--font-mono)', fontSize: 9,
-                          letterSpacing: '0.04em', pointerEvents: 'none',
-                          opacity: c.active ? 0.85 : 0.4,
-                        }}>
-                    {c.asos}
-                  </text>
+                  {/* City name on hover */}
+                  {isHover && (
+                    <text x="0" y={MARKER_R + 14} textAnchor="middle"
+                          fill="var(--cloud-pearl)"
+                          style={{
+                            fontFamily: 'var(--font-display)',
+                            fontSize: 12,
+                            fontWeight: 500,
+                            pointerEvents: 'none',
+                          }}>
+                      {c.name}
+                    </text>
+                  )}
                 </g>
               );
             })}
           </g>
         </svg>
 
+        {/* Floating mode controls overlay (top-left) */}
+        <div style={S.controlOverlay}>
+          <div style={S.pillRow}>
+            {MODES.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setMode(m.id)}
+                style={{ ...S.pill, ...(mode === m.id ? S.pillActive : null) }}
+                aria-pressed={mode === m.id}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+          <div style={S.toggleGroup}>
+            <button onClick={() => setMarketType('high')}
+                    style={{ ...S.miniPill, ...(marketType === 'high' ? S.miniPillActive : null) }}
+                    aria-pressed={marketType === 'high'}>HIGH</button>
+            <button onClick={() => setMarketType('low')}
+                    style={{ ...S.miniPill, ...(marketType === 'low' ? S.miniPillActive : null) }}
+                    aria-pressed={marketType === 'low'}>LOW</button>
+          </div>
+          <div className="numeric" style={S.modeCaption}>
+            {MODES.find((m) => m.id === mode)?.caption}
+            <span style={{ color: 'var(--cloud-mute)' }}>
+              {' · target '}
+              {forecastTargetDate(forecasts) || '—'}
+            </span>
+          </div>
+        </div>
+
+        {/* Hover card */}
         {hover && (
           <HoverCard
             city={cityValues.find((c) => c.name === hover)}
@@ -358,6 +374,7 @@ export default function WeatherMap({ data, freshness }) {
         )}
       </div>
 
+      {/* Legend + footer */}
       <div style={S.legendRow}>
         <Legend mode={mode} valueRange={valueRange} marketType={marketType} />
         <div style={S.legendMeta}>
@@ -370,6 +387,12 @@ export default function WeatherMap({ data, freshness }) {
               <span>{forecasts.length} forecasts</span>
               <span style={S.legendDot} />
               <span>{cityValues.filter((c) => c.value != null).length} of 20 active</span>
+              {mode === 'market' && (
+                <>
+                  <span style={S.legendDot} />
+                  <span>{Object.keys(markets || {}).length} live prices</span>
+                </>
+              )}
             </>
           )}
         </div>
@@ -379,11 +402,195 @@ export default function WeatherMap({ data, freshness }) {
 }
 
 
-// ─── Hover card ──────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// Weather classification — maps (μ, σ) → glyph type.
+// ─────────────────────────────────────────────────────────────────────
+function classifyWeather(mu, sigma) {
+  if (!Number.isFinite(mu) || !Number.isFinite(sigma)) return 'unknown';
+  // Storms / blizzards when σ is large (model can't agree).
+  if (sigma >= 4.0) return mu < 38 ? 'blizzard' : 'storm';
+  // Mid-σ → clouds; flavor by temperature.
+  if (sigma >= 2.5) {
+    if (mu < 36) return 'snow';
+    if (mu < 50) return 'overcast';
+    return 'partly_cloudy';
+  }
+  // Low σ → clear; flavor by temperature.
+  if (mu >= 88) return 'heat';
+  if (mu >= 70) return 'sunny';
+  if (mu >= 50) return 'clear_cool';
+  if (mu >= 36) return 'frost';
+  return 'snow';
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Weather glyph dispatch
+// ─────────────────────────────────────────────────────────────────────
+function WeatherGlyph({ type, size = 32, cityIdx = 0 }) {
+  switch (type) {
+    case 'heat':         return <SunGlyph size={size} color="#f0b243" glow />;
+    case 'sunny':        return <SunGlyph size={size} color="#d4a44a" />;
+    case 'clear_cool':   return <SunGlyph size={size} color="#e8d8a8" small />;
+    case 'partly_cloudy':return <PartlyCloudyGlyph size={size} />;
+    case 'overcast':     return <CloudGlyph size={size} color="#8a8a98" />;
+    case 'storm':        return <StormGlyph size={size} cityIdx={cityIdx} />;
+    case 'blizzard':     return <BlizzardGlyph size={size} cityIdx={cityIdx} />;
+    case 'frost':        return <SnowflakeGlyph size={size} color="#c9e0ed" />;
+    case 'snow':         return <SnowflakeGlyph size={size} color="#e8eef5" />;
+    default:             return <UnknownGlyph size={size} />;
+  }
+}
+
+function SunGlyph({ size = 32, color = '#d4a44a', glow = false, small = false }) {
+  const coreR = size * (small ? 0.22 : 0.26);
+  const inR   = size * 0.36;
+  const outR  = size * 0.52;
+  const rays = 8;
+  // Rotate the entire glyph slowly.  Use CSS animation via inline style.
+  return (
+    <g style={{
+      transformOrigin: 'center',
+      transformBox: 'fill-box',
+      animation: 'wm-sun-spin 60s linear infinite',
+    }}>
+      {glow && (
+        <circle cx="0" cy="0" r={size * 0.55} fill={color} opacity="0.18" filter="url(#marker-halo)" />
+      )}
+      {Array.from({ length: rays }).map((_, i) => {
+        const angle = (i * 2 * Math.PI) / rays;
+        const x1 = Math.cos(angle) * inR;
+        const y1 = Math.sin(angle) * inR;
+        const x2 = Math.cos(angle) * outR;
+        const y2 = Math.sin(angle) * outR;
+        return (
+          <line key={i} x1={x1} y1={y1} x2={x2} y2={y2}
+                stroke={color} strokeWidth={small ? 1.1 : 1.6}
+                strokeLinecap="round" opacity={0.85} />
+        );
+      })}
+      <circle cx="0" cy="0" r={coreR} fill={color} opacity={glow ? 0.95 : 0.9} />
+    </g>
+  );
+}
+
+function CloudGlyph({ size = 32, color = '#8a8a98', opacity = 0.92, dx = 0, dy = 0 }) {
+  const r = size * 0.26;
+  return (
+    <g fill={color} opacity={opacity} transform={`translate(${dx}, ${dy})`}>
+      <circle cx={-r * 0.9} cy={r * 0.1} r={r * 0.78} />
+      <circle cx={0} cy={-r * 0.45} r={r * 0.95} />
+      <circle cx={r * 0.9} cy={r * 0.1} r={r * 0.78} />
+      <ellipse cx="0" cy={r * 0.55} rx={r * 1.7} ry={r * 0.62} />
+    </g>
+  );
+}
+
+function PartlyCloudyGlyph({ size = 32 }) {
+  // Sun + cloud overlay
+  return (
+    <g>
+      <g transform={`translate(${size * 0.18}, ${-size * 0.16}) scale(0.75)`}>
+        <SunGlyph size={size} color="#d4a44a" small />
+      </g>
+      <g transform={`translate(${-size * 0.12}, ${size * 0.08})`}>
+        <CloudGlyph size={size * 0.95} color="#9aa1ad" opacity={0.94} />
+      </g>
+    </g>
+  );
+}
+
+function StormGlyph({ size = 32, cityIdx = 0 }) {
+  // Dark cloud + lightning bolt that flashes periodically.  Offset
+  // the flash by city index so 20 storms don't all light up at once.
+  const lightX = -size * 0.06;
+  const flashDelay = (cityIdx * 0.37) % 3.5;
+  return (
+    <g>
+      <CloudGlyph size={size} color="#5d4775" opacity={0.95} />
+      <polygon
+        points={`${lightX + 2},${size * 0.1} ${lightX - size * 0.10},${size * 0.34} ${lightX + 1},${size * 0.34} ${lightX - size * 0.05},${size * 0.55} ${lightX + size * 0.12},${size * 0.22} ${lightX + 1},${size * 0.22}`}
+        fill="#e8c069">
+        <animate attributeName="opacity"
+                 values="0.95;0.95;0.25;0.95;0.95"
+                 dur="3.2s"
+                 begin={`${flashDelay}s`}
+                 keyTimes="0;0.4;0.5;0.6;1"
+                 repeatCount="indefinite" />
+      </polygon>
+    </g>
+  );
+}
+
+function BlizzardGlyph({ size = 32, cityIdx = 0 }) {
+  // Storm cloud + falling snowflakes
+  return (
+    <g>
+      <CloudGlyph size={size} color="#5d6776" opacity={0.92} />
+      {[0, 1, 2].map((i) => {
+        const x = (i - 1) * (size * 0.18);
+        return (
+          <circle key={i} cx={x} cy={size * 0.32 + i * 1.5} r={1.6}
+                  fill="#e8eef5" opacity="0.9">
+            <animate
+              attributeName="cy"
+              values={`${size * 0.18};${size * 0.55}`}
+              dur={`${1.4 + ((cityIdx + i) % 3) * 0.4}s`}
+              repeatCount="indefinite" />
+            <animate
+              attributeName="opacity"
+              values="0;0.9;0"
+              dur={`${1.4 + ((cityIdx + i) % 3) * 0.4}s`}
+              repeatCount="indefinite" />
+          </circle>
+        );
+      })}
+    </g>
+  );
+}
+
+function SnowflakeGlyph({ size = 32, color = '#c9e0ed' }) {
+  // Stylized 6-arm snowflake
+  return (
+    <g stroke={color} strokeWidth={1.2} fill="none" strokeLinecap="round"
+       style={{
+         transformOrigin: 'center',
+         transformBox: 'fill-box',
+         animation: 'wm-snow-spin 50s linear infinite',
+       }}>
+      {[0, 60, 120].map((deg) => (
+        <g key={deg} transform={`rotate(${deg})`}>
+          <line x1={-size * 0.36} y1="0" x2={size * 0.36} y2="0" />
+          <line x1={-size * 0.22} y1="0" x2={-size * 0.16} y2={-size * 0.08} />
+          <line x1={-size * 0.22} y1="0" x2={-size * 0.16} y2={size * 0.08} />
+          <line x1={size * 0.22} y1="0" x2={size * 0.16} y2={-size * 0.08} />
+          <line x1={size * 0.22} y1="0" x2={size * 0.16} y2={size * 0.08} />
+        </g>
+      ))}
+      <circle cx="0" cy="0" r="1.6" fill={color} stroke="none" />
+    </g>
+  );
+}
+
+function UnknownGlyph({ size = 32 }) {
+  return (
+    <g>
+      <circle cx="0" cy="0" r={size * 0.32}
+              fill="none" stroke="var(--cloud-mute)" strokeWidth="1"
+              strokeDasharray="3 4" opacity="0.6" />
+    </g>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Hover card
+// ─────────────────────────────────────────────────────────────────────
 function HoverCard({ city, marketType }) {
   if (!city) return null;
   const f = city.fcst;
   const m = city.mkt;
+  const weather = classifyWeather(city.mu, city.sigma);
   return (
     <div style={S.hoverCard}>
       <div style={S.hoverHead}>
@@ -393,18 +600,23 @@ function HoverCard({ city, marketType }) {
             {city.asos} · {marketType.toUpperCase()}
           </div>
         </div>
-        {city.marine && <div style={S.hoverChip}>marine</div>}
+        <div style={S.hoverWeatherCell}>
+          <svg viewBox="-22 -22 44 44" width={44} height={44}>
+            <WeatherGlyph type={weather} size={32} cityIdx={0} />
+          </svg>
+          <div style={S.hoverWeatherLabel}>{prettyWeather(weather)}</div>
+        </div>
       </div>
 
       {f ? (
         <div style={S.hoverBlock}>
           <div className="eyebrow" style={S.hoverEyebrow}>forecast</div>
           <div style={S.hoverGrid}>
-            <Row label="μ"       value={fmt1(f.mu_cal)}     unit="°F" />
-            <Row label="σ"       value={fmt1(f.sigma_cal)}  unit="°F" />
-            <Row label="p10"     value={fmt0(f.q10)}        unit="°F" />
-            <Row label="p50"     value={fmt0(f.q50)}        unit="°F" />
-            <Row label="p90"     value={fmt0(f.q90)}        unit="°F" />
+            <Row label="μ"       value={fmt1(f.mu_cal)}    unit="°F" />
+            <Row label="σ"       value={fmt1(f.sigma_cal)} unit="°F" />
+            <Row label="p10"     value={fmt0(f.q10)}       unit="°F" />
+            <Row label="p50"     value={fmt0(f.q50)}       unit="°F" />
+            <Row label="p90"     value={fmt0(f.q90)}       unit="°F" />
             <Row label="sources" value={f.n_sources ?? '—'} unit="" />
           </div>
         </div>
@@ -418,7 +630,12 @@ function HoverCard({ city, marketType }) {
           <div style={S.hoverGrid}>
             <Row label="yes bid" value={fmtCents(m.yes_bid)} unit="" />
             <Row label="yes ask" value={fmtCents(m.yes_ask)} unit="" />
-            {m.threshold != null && <Row label="strike" value={fmt0(m.threshold)} unit="°F" />}
+            {(m.strike != null || m.threshold != null) && (
+              <Row label="strike" value={fmt1(m.strike ?? m.threshold)} unit="°F" />
+            )}
+            {m.volume_24h != null && (
+              <Row label="vol 24h" value={fmt0(m.volume_24h)} unit="" />
+            )}
           </div>
         </div>
       )}
@@ -438,7 +655,9 @@ function Row({ label, value, unit }) {
 }
 
 
-// ─── Legend ──────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// Legend
+// ─────────────────────────────────────────────────────────────────────
 function Legend({ mode, valueRange, marketType }) {
   if (mode === 'forecast') {
     return (
@@ -458,7 +677,7 @@ function Legend({ mode, valueRange, marketType }) {
   }
   if (mode === 'market') {
     return (
-      <Bar title="yes-mid · ¢" sub={marketType.toUpperCase()}
+      <Bar title="yes-mid · ¢ · at-the-money strike" sub={marketType.toUpperCase()}
            leftColor="rgb(186, 78, 88)" midColor="rgb(220, 215, 195)" rightColor="rgb(212, 169, 60)"
            leftLabel="0¢" rightLabel="100¢" />
     );
@@ -496,8 +715,9 @@ function Bar({ title, sub, leftColor, midColor, rightColor, leftLabel, rightLabe
 }
 
 
-// ─── Helpers ─────────────────────────────────────────────────────────
-
+// ─────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────
 function forecastTargetDate(forecasts) {
   if (!forecasts || forecasts.length === 0) return null;
   const counts = new Map();
@@ -511,26 +731,38 @@ function forecastTargetDate(forecasts) {
   return best;
 }
 
+function prettyWeather(w) {
+  switch (w) {
+    case 'heat':           return 'heat dome';
+    case 'sunny':          return 'sunny';
+    case 'clear_cool':     return 'clear';
+    case 'partly_cloudy':  return 'partly cloudy';
+    case 'overcast':       return 'overcast';
+    case 'storm':          return 'storm watch';
+    case 'blizzard':       return 'winter storm';
+    case 'frost':          return 'frost';
+    case 'snow':           return 'snow';
+    default:               return '—';
+  }
+}
+
 const fmt0 = (v) => (v == null || !Number.isFinite(Number(v))) ? '—' : Number(v).toFixed(0);
 const fmt1 = (v) => (v == null || !Number.isFinite(Number(v))) ? '—' : Number(v).toFixed(1);
 const fmtCents = (v) => (v == null || !Number.isFinite(Number(v)))
   ? '—' : `${(Number(v) * 100).toFixed(0)}¢`;
 
-function ramp2(t, c0, c1) {
+function ramp2rgba(t, c0, c1) {
   const tt = Math.max(0, Math.min(1, t));
   const r = Math.round(c0[0] + (c1[0] - c0[0]) * tt);
   const g = Math.round(c0[1] + (c1[1] - c0[1]) * tt);
   const b = Math.round(c0[2] + (c1[2] - c0[2]) * tt);
-  return { fill: `rgb(${r},${g},${b})`, stroke: 'rgba(255,255,255,0.18)', text: textOnFill(r, g, b) };
+  const a = c0[3] + (c1[3] - c0[3]) * tt;
+  return `rgba(${r}, ${g}, ${b}, ${a.toFixed(2)})`;
 }
-function ramp3(t, c0, c1, c2) {
+function ramp3rgba(t, c0, c1, c2) {
   const tt = Math.max(0, Math.min(1, t));
-  if (tt <= 0.5) return ramp2(tt * 2, c0, c1);
-  return ramp2((tt - 0.5) * 2, c1, c2);
-}
-function textOnFill(r, g, b) {
-  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-  return lum > 0.55 ? 'rgba(15, 17, 22, 0.92)' : 'rgba(245, 245, 240, 0.92)';
+  if (tt <= 0.5) return ramp2rgba(tt * 2, c0, c1);
+  return ramp2rgba((tt - 0.5) * 2, c1, c2);
 }
 
 // Build N drifting cumulus particles.  Deterministic positions via index
@@ -538,12 +770,12 @@ function textOnFill(r, g, b) {
 function buildDrift(n) {
   const out = [];
   for (let i = 0; i < n; i++) {
-    const yBand = (i / n) * 0.85 + 0.05;
-    const startX = ((i * 137) % 100) - 30;          // jitter
-    const r = 18 + ((i * 31) % 22);
-    const dur = 70 + ((i * 53) % 90);
+    const yBand  = (i / n) * 0.88 + 0.04;
+    const startX = ((i * 137) % 100) - 30;
+    const r = 20 + ((i * 31) % 26);
+    const dur = 90 + ((i * 53) % 110);
     const delay = -((i * 11) % dur);
-    const opacity = 0.06 + ((i * 7) % 12) / 100;
+    const opacity = 0.05 + ((i * 7) % 11) / 100;
     out.push({
       x: (startX / 100) * MAP_W,
       y: yBand * MAP_H,
@@ -556,31 +788,67 @@ function buildDrift(n) {
 
 const driftKeyframes = `
 @keyframes wm-drift-1 {
-  0%   { transform: translate3d(-120px, 0, 0); }
-  100% { transform: translate3d(${MAP_W + 200}px, 0, 0); }
+  0%   { transform: translate3d(-200px, 0, 0); }
+  100% { transform: translate3d(${MAP_W + 280}px, 0, 0); }
 }
 @keyframes wm-drift-2 {
-  0%   { transform: translate3d(-160px, -8px, 0); }
+  0%   { transform: translate3d(-220px, -8px, 0); }
   50%  { transform: translate3d(${(MAP_W / 2)}px, 8px, 0); }
-  100% { transform: translate3d(${MAP_W + 240}px, -4px, 0); }
+  100% { transform: translate3d(${MAP_W + 320}px, -4px, 0); }
 }
 @keyframes wm-drift-3 {
-  0%   { transform: translate3d(-200px, 4px, 0); }
-  100% { transform: translate3d(${MAP_W + 260}px, -6px, 0); }
+  0%   { transform: translate3d(-260px, 4px, 0); }
+  100% { transform: translate3d(${MAP_W + 340}px, -6px, 0); }
+}
+@keyframes wm-sun-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes wm-snow-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(-360deg); }
 }
 `;
 
 
-// ─── Styles ──────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// Styles
+// ─────────────────────────────────────────────────────────────────────
 const S = {
-  controlRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 'var(--space-4)',
-    marginBottom: 'var(--space-2)',
-    flexWrap: 'wrap',
+  mapShell: {
+    position: 'relative',
+    background:
+      'radial-gradient(circle at 50% 55%, var(--ink-mid) 0%, var(--ink-deep) 75%)',
+    border: '1px solid var(--rule-mid)',
+    borderRadius: 'var(--radius-md)',
+    overflow: 'hidden',
+    aspectRatio: `${MAP_W} / ${MAP_H}`,
+    minHeight: 600,
   },
+  mapSvg: {
+    display: 'block',
+    width: '100%',
+    height: '100%',
+  },
+
+  controlOverlay: {
+    position: 'absolute',
+    top: 'var(--space-4)',
+    left: 'var(--space-4)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 'var(--space-2)',
+    padding: 'var(--space-3) var(--space-4)',
+    background: 'color-mix(in srgb, var(--ink-deep) 85%, transparent)',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+    border: '1px solid var(--rule-mid)',
+    borderRadius: 'var(--radius-md)',
+    boxShadow: 'var(--shadow-card)',
+    zIndex: 4,
+    maxWidth: '60%',
+  },
+
   pillRow: {
     display: 'flex',
     gap: 'var(--space-1)',
@@ -630,42 +898,26 @@ const S = {
     borderColor: 'var(--dawn-gold)',
     fontWeight: 500,
   },
-
   modeCaption: {
     fontStyle: 'italic',
     fontFamily: 'var(--font-display)',
     fontSize: 'var(--type-small)',
-    color: 'var(--cloud-mute)',
-    marginBottom: 'var(--space-3)',
-  },
-
-  mapShell: {
-    position: 'relative',
-    background:
-      'radial-gradient(circle at 50% 60%, var(--ink-mid) 0%, var(--ink-deep) 70%)',
-    border: '1px solid var(--rule-mid)',
-    borderRadius: 'var(--radius-md)',
-    overflow: 'hidden',
-    aspectRatio: `${MAP_W} / ${MAP_H}`,
-  },
-  mapSvg: {
-    display: 'block',
-    width: '100%',
-    height: '100%',
+    color: 'var(--cloud-haze)',
+    marginTop: 'var(--space-1)',
   },
 
   hoverCard: {
     position: 'absolute',
-    top: 'var(--space-3)',
-    right: 'var(--space-3)',
-    width: 280,
+    top: 'var(--space-4)',
+    right: 'var(--space-4)',
+    width: 300,
     background: 'color-mix(in srgb, var(--ink-deep) 92%, transparent)',
     backdropFilter: 'blur(8px)',
     WebkitBackdropFilter: 'blur(8px)',
     border: '1px solid var(--rule-mid)',
     borderRadius: 'var(--radius-md)',
     padding: 'var(--space-4)',
-    boxShadow: 'var(--shadow-elev, 0 8px 24px rgba(0,0,0,0.45))',
+    boxShadow: '0 12px 40px -16px rgba(0,0,0,0.65)',
     zIndex: 5,
     pointerEvents: 'none',
   },
@@ -673,24 +925,27 @@ const S = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
+    gap: 'var(--space-3)',
     marginBottom: 'var(--space-3)',
   },
   hoverCity: {
-    fontFamily: 'var(--font-headings, var(--font-display))',
+    fontFamily: 'var(--font-display)',
     fontSize: 'var(--type-large)',
     color: 'var(--cloud-pearl)',
     letterSpacing: '-0.01em',
     fontWeight: 500,
   },
-  hoverChip: {
+  hoverWeatherCell: {
+    textAlign: 'center',
+    minWidth: 70,
+  },
+  hoverWeatherLabel: {
     fontFamily: 'var(--font-mono)',
-    fontSize: 'var(--type-micro)',
+    fontSize: 9,
+    color: 'var(--cloud-mute)',
     letterSpacing: '0.08em',
-    padding: '2px 8px',
-    borderRadius: 'var(--radius-pill)',
-    background: 'color-mix(in srgb, var(--sky-azure) 18%, transparent)',
-    color: 'var(--sky-azure)',
     textTransform: 'uppercase',
+    marginTop: 'var(--space-1)',
   },
   hoverBlock: {
     paddingTop: 'var(--space-3)',

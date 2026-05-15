@@ -133,7 +133,7 @@ export default function Dashboard() {
   const meta     = payload.meta     || {};
   const fresh    = (slug) => meta?.freshness?.[slug];
 
-  const mapMarkets    = extractLiveMarkets(payload);
+  const mapMarkets    = extractMarketsFromMV(sections.map_market) || extractLiveMarkets(payload);
   const mapThresholds = extractThresholds(payload);
 
   return (
@@ -286,6 +286,32 @@ function Footer({ payload }) {
 
 
 // ─── Live-market extraction helpers ─────────────────────────────
+
+// Preferred source: analytics.v_map_market_today via sections.map_market.
+// Surfaces the at-the-money strike per (city, market_type) for ALL 20
+// city markets, not just ones we hold positions on.  Returns null when
+// the MV section is unavailable so we can fall through to the v1 path.
+function extractMarketsFromMV(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const out = {};
+  for (const r of rows) {
+    const city = String(r.city || '');
+    if (!city) continue;
+    const mt = String(r.market_type || 'high').toLowerCase();
+    out[city] ??= {};
+    out[city][mt] = {
+      yes_bid:   r.yes_bid   != null ? Number(r.yes_bid)   : null,
+      yes_ask:   r.yes_ask   != null ? Number(r.yes_ask)   : null,
+      yes_mid:   r.yes_mid   != null ? Number(r.yes_mid)   : null,
+      strike:    r.strike_mid != null ? Number(r.strike_mid) : null,
+      threshold: r.strike_mid != null ? Number(r.strike_mid) : null,
+      volume_24h: r.volume_24h != null ? Number(r.volume_24h) : null,
+      ticker:    r.ticker ?? null,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 function extractLiveMarkets(payload) {
   const v1 = payload?.v1?.payload;
   if (!v1) return null;
