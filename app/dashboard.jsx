@@ -14,17 +14,18 @@
  * /login so the user can re-auth.
  *
  * Section composition (top → bottom):
- *   0.  Bankroll          — top-of-page P&L tracker (NEW 2026-05-09)
- *   1.  WeatherMap        — geographic surface for the 20 markets
- *   2.  Oracle            — calibration deciles
- *   3.  TributaryEnsemble — per-source skill
- *   4.  DecisionsRendered — signal funnel
- *   5.  RealizedEdge      — P&L attribution (3 tiers)
- *   6.  Vigil             — calibration-stack internals (3 panels)
- *   7.  DataCompleteness  — data-gap monitor
- *   8.  ClosingLineCoverage — CLV capture rate
- *   9.  OperationalPulse  — API health
- *  10.  TradeLedger       — trade history (bottom — densest)
+ *   0.  Bankroll             — top-of-page P&L tracker
+ *   1.  WeatherMap           — geographic surface for the 20 markets
+ *   2.  Oracle               — calibration deciles
+ *   3.  CalibrationPipeline  — 4-stage calibration story (sources → EMOS
+ *                              → isotonic → station biases).  Replaced
+ *                              TributaryEnsemble + Vigil 2026-05-15.
+ *   4.  DecisionsRendered    — signal funnel
+ *   5.  RealizedEdge         — P&L attribution (3 tiers)
+ *   6.  DataCompleteness     — data-gap monitor
+ *   7.  ClosingLineCoverage  — CLV capture rate
+ *   8.  OperationalPulse     — API health
+ *   9.  TradeLedger          — trade history (bottom — densest)
  *
  * Each section component contracts on either:
  *   * `rows` (most sections — flat array of MV rows)
@@ -40,10 +41,9 @@ import { useEffect, useState } from 'react';
 import Bankroll            from '@/components/sections/Bankroll';
 import WeatherMap          from '@/components/sections/WeatherMap';
 import Oracle              from '@/components/sections/Oracle';
-import TributaryEnsemble   from '@/components/sections/TributaryEnsemble';
+import CalibrationPipeline from '@/components/sections/CalibrationPipeline';
 import DecisionsRendered   from '@/components/sections/DecisionsRendered';
 import RealizedEdge        from '@/components/sections/RealizedEdge';
-import Vigil               from '@/components/sections/Vigil';
 import DataCompleteness    from '@/components/sections/DataCompleteness';
 import ClosingLineCoverage from '@/components/sections/ClosingLineCoverage';
 import OperationalPulse    from '@/components/sections/OperationalPulse';
@@ -166,15 +166,24 @@ export default function Dashboard() {
           freshness={fresh('map')}
         />
 
-        {/* 2-4. Model honesty / source skill / decision funnel */}
+        {/* 2. Model honesty (calibration deciles) */}
         <Oracle
           rows={sections.calibration || []}
           freshness={fresh('calibration')}
         />
-        <TributaryEnsemble
-          rows={sections.sources || []}
+
+        {/* 3. Four-stage calibration pipeline (sources → EMOS → isotonic → biases) */}
+        <CalibrationPipeline
+          data={{
+            sources:        sections.sources        || [],
+            emos:           sections.vigil_emos     || [],
+            isotonic:       sections.vigil_isotonic || [],
+            station_biases: sections.vigil_biases   || [],
+          }}
           freshness={fresh('sources')}
         />
+
+        {/* 4. Decision funnel */}
         <DecisionsRendered
           rows={sections.signals || []}
           freshness={fresh('signals')}
@@ -188,16 +197,6 @@ export default function Dashboard() {
             pipeline_counts:  (sections.pipeline_counts && sections.pipeline_counts[0]) || null,
           }}
           freshness={fresh('attribution')}
-        />
-
-        {/* 6. Calibration internals (3-panel — EMOS / isotonic / biases) */}
-        <Vigil
-          data={{
-            emos:           sections.vigil_emos     || [],
-            isotonic:       sections.vigil_isotonic || [],
-            station_biases: sections.vigil_biases   || [],
-          }}
-          freshness={fresh('vigil_emos')}
         />
 
         {/* 7-9. Data + ops health */}
