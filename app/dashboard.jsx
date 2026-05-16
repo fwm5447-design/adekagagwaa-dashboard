@@ -175,10 +175,11 @@ export default function Dashboard() {
         {/* 3. Four-stage calibration pipeline (sources → EMOS → isotonic → biases) */}
         <CalibrationPipeline
           data={{
-            sources:        sections.sources        || [],
-            emos:           sections.vigil_emos     || [],
-            isotonic:       sections.vigil_isotonic || [],
-            station_biases: sections.vigil_biases   || [],
+            sources:         sections.sources         || [],
+            forecast_errors: sections.forecast_errors || [],
+            emos:            sections.vigil_emos      || [],
+            isotonic:        sections.vigil_isotonic  || [],
+            station_biases:  sections.vigil_biases    || [],
           }}
           freshness={fresh('sources')}
         />

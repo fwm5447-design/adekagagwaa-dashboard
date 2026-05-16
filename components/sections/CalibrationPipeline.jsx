@@ -33,10 +33,11 @@ import StatusPill from '../primitives/StatusPill';
  *                          it's the MV-backed cadence
  */
 export default function CalibrationPipeline({ data = {}, freshness }) {
-  const sources      = useMemo(() => Array.isArray(data.sources)        ? data.sources        : [], [data.sources]);
-  const emosRows     = useMemo(() => Array.isArray(data.emos)           ? data.emos           : [], [data.emos]);
-  const isotonicRows = useMemo(() => Array.isArray(data.isotonic)       ? data.isotonic       : [], [data.isotonic]);
-  const biasRows     = useMemo(() => Array.isArray(data.station_biases) ? data.station_biases : [], [data.station_biases]);
+  const sources         = useMemo(() => Array.isArray(data.sources)         ? data.sources         : [], [data.sources]);
+  const forecastErrors  = useMemo(() => Array.isArray(data.forecast_errors) ? data.forecast_errors : [], [data.forecast_errors]);
+  const emosRows        = useMemo(() => Array.isArray(data.emos)            ? data.emos            : [], [data.emos]);
+  const isotonicRows    = useMemo(() => Array.isArray(data.isotonic)        ? data.isotonic        : [], [data.isotonic]);
+  const biasRows        = useMemo(() => Array.isArray(data.station_biases)  ? data.station_biases  : [], [data.station_biases]);
 
   // Permit both freshness shapes (legacy: a single timestamp; new: an object).
   const sourcesFresh = (freshness && typeof freshness === 'object') ? freshness.sources : freshness;
@@ -54,6 +55,11 @@ export default function CalibrationPipeline({ data = {}, freshness }) {
         n_paired: Number(r.n_paired),
         n_tmax: Number(r.n_paired_tmax),
         n_tmin: Number(r.n_paired_tmin),
+        rmse_7d: Number(r.rmse_7d),
+        bias_7d: Number(r.bias_7d),
+        n_paired_7d: Number(r.n_paired_7d),
+        rmse_drift: Number(r.rmse_drift),
+        rmse_drift_pct: Number(r.rmse_drift_pct),
       }))
       .filter((d) => Number.isFinite(d.rmse))
       .sort((a, b) => a.rmse - b.rmse);
@@ -168,6 +174,50 @@ export default function CalibrationPipeline({ data = {}, freshness }) {
     }
     return max;
   }, [biasRows]);
+
+  // ── Forecast error watch (last 14 days) ─────────────────────────
+  // One row per (city, market_type, target_date) pairing the bot's
+  // pre-settle mu/sigma to the canonical observation.  Used to flag
+  // per-city under-dispersion — a 3σ miss is a once-in-300-day event
+  // under a calibrated Gaussian, so multiple per month signals σ is
+  // structurally too tight on the affected cells.
+  const forecastErrorStats = useMemo(() => {
+    if (forecastErrors.length === 0) return null;
+    let sumAbs = 0, sumAbsN = 0;
+    let n2 = 0, n3 = 0;
+    const enriched = forecastErrors.map((r) => ({
+      city: String(r.city),
+      market_type: String(r.market_type),
+      target_date: String(r.target_date),
+      bot_mu: Number(r.bot_mu),
+      bot_sigma: Number(r.bot_sigma),
+      observed: Number(r.observed_value),
+      error: Number(r.error),
+      abs_error: Number(r.abs_error),
+      n_sigma: Number(r.n_sigma),
+      observed_source: r.observed_source,
+    }));
+    for (const r of enriched) {
+      if (Number.isFinite(r.abs_error)) sumAbs += r.abs_error;
+      if (Number.isFinite(r.n_sigma)) {
+        const a = Math.abs(r.n_sigma);
+        sumAbsN += a;
+        if (a >= 2) n2 += 1;
+        if (a >= 3) n3 += 1;
+      }
+    }
+    enriched.sort((a, b) => Math.abs(b.n_sigma) - Math.abs(a.n_sigma));
+    return {
+      n: enriched.length,
+      mean_abs_error: sumAbs / enriched.length,
+      mean_abs_n_sigma: sumAbsN / enriched.length,
+      n_2sigma: n2,
+      n_3sigma: n3,
+      pct_2sigma: n2 / enriched.length,
+      pct_3sigma: n3 / enriched.length,
+      worst: enriched.slice(0, 10),
+    };
+  }, [forecastErrors]);
 
   // ── Pipeline verdict ────────────────────────────────────────────
   const verdict = useMemo(() => buildVerdict({
@@ -284,33 +334,52 @@ export default function CalibrationPipeline({ data = {}, freshness }) {
                         <th style={S.thLeft}>Source</th>
                         <th style={S.thLeft}>Variant</th>
                         <th style={S.thRight}>n paired</th>
-                        <th style={S.thRight}>n tmax</th>
-                        <th style={S.thRight}>n tmin</th>
                         <th style={S.thRight}>Bias</th>
                         <th style={S.thRight}>MAE</th>
-                        <th style={S.thRight}>RMSE</th>
+                        <th style={S.thRight}>RMSE · 30d</th>
+                        <th style={S.thRight}>RMSE · 7d</th>
+                        <th style={S.thRight}>drift</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {sourceStats.data.map((d, i) => (
-                        <tr key={i} style={S.tbodyRow}>
-                          <td style={S.tdLeft}>{d.source}</td>
-                          <td style={{ ...S.tdLeft, color: 'var(--cloud-mute)' }}>{d.variant || '—'}</td>
-                          <td style={S.tdRight}>{fmtInt(d.n_paired)}</td>
-                          <td style={S.tdRight}>{fmtInt(d.n_tmax)}</td>
-                          <td style={S.tdRight}>{fmtInt(d.n_tmin)}</td>
-                          <td style={{ ...S.tdRight, color: biasColor(d.bias) }}>
-                            {Number.isFinite(d.bias) ? `${d.bias > 0 ? '+' : ''}${d.bias.toFixed(2)}` : '—'}
-                          </td>
-                          <td style={S.tdRight}>{Number.isFinite(d.mae) ? d.mae.toFixed(2) : '—'}</td>
-                          <td style={{ ...S.tdRight, color: rmseColor(d.rmse), fontWeight: 600 }}>
-                            {Number.isFinite(d.rmse) ? d.rmse.toFixed(2) : '—'}
-                          </td>
-                        </tr>
-                      ))}
+                      {sourceStats.data.map((d, i) => {
+                        const driftPct = Number.isFinite(d.rmse_drift_pct) ? d.rmse_drift_pct : null;
+                        const driftColor = driftPct == null ? 'var(--cloud-shade)'
+                          : driftPct > 0.20 ? 'var(--coral-flare)'
+                          : driftPct > 0.10 ? 'var(--storm-violet)'
+                          : driftPct > 0.05 ? 'var(--dawn-amber)'
+                          : driftPct < -0.05 ? 'var(--dawn-gold)'
+                          : 'var(--cloud-haze)';
+                        return (
+                          <tr key={i} style={S.tbodyRow}>
+                            <td style={S.tdLeft}>{d.source}</td>
+                            <td style={{ ...S.tdLeft, color: 'var(--cloud-mute)' }}>{d.variant || '—'}</td>
+                            <td style={S.tdRight}>{fmtInt(d.n_paired)}</td>
+                            <td style={{ ...S.tdRight, color: biasColor(d.bias) }}>
+                              {Number.isFinite(d.bias) ? `${d.bias > 0 ? '+' : ''}${d.bias.toFixed(2)}` : '—'}
+                            </td>
+                            <td style={S.tdRight}>{Number.isFinite(d.mae) ? d.mae.toFixed(2) : '—'}</td>
+                            <td style={{ ...S.tdRight, color: rmseColor(d.rmse), fontWeight: 600 }}>
+                              {Number.isFinite(d.rmse) ? d.rmse.toFixed(2) : '—'}
+                            </td>
+                            <td style={{ ...S.tdRight, color: rmseColor(d.rmse_7d) }}>
+                              {Number.isFinite(d.rmse_7d) ? d.rmse_7d.toFixed(2) : '—'}
+                            </td>
+                            <td style={{ ...S.tdRight, color: driftColor, fontWeight: 600 }}>
+                              {driftPct == null ? '—'
+                                : `${driftPct > 0 ? '+' : ''}${(driftPct * 100).toFixed(0)}%`}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
+
+                {/* Forecast error watch — last 14 days */}
+                {forecastErrorStats && (
+                  <ForecastErrorPanel stats={forecastErrorStats} />
+                )}
               </>
             )}
           </Stage>
@@ -793,6 +862,155 @@ function BiasHistogram({ rows, range }) {
 // ─────────────────────────────────────────────────────────────────────
 // Tiny shared primitives
 // ─────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// Forecast error watch — last 14 days, sortable watchlist.
+// Pairs the bot's pre-settle (mu, sigma) against the canonical
+// observation.  Multiple ≥2σ misses per month indicates σ is too tight
+// on those cells.
+// ─────────────────────────────────────────────────────────────────────
+function ForecastErrorPanel({ stats }) {
+  const tile2 = stats.pct_2sigma > 0.10
+    ? { fg: 'var(--storm-violet)' }
+    : stats.pct_2sigma > 0.06
+        ? { fg: 'var(--dawn-amber)' }
+        : { fg: 'var(--dawn-gold)' };
+  const tile3 = stats.n_3sigma > 0
+    ? { fg: 'var(--coral-flare)' }
+    : { fg: 'var(--dawn-gold)' };
+
+  return (
+    <div style={{ marginTop: 'var(--space-4)' }}>
+      <div className="eyebrow" style={{ color: 'var(--cloud-mute)', marginBottom: 'var(--space-3)' }}>
+        forecast error watch · last 14 days · bot μ vs canonical observation
+      </div>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+        gap: 'var(--space-3)',
+        marginBottom: 'var(--space-3)',
+      }}>
+        <Tile
+          eyebrow="settled forecasts"
+          value={fmtInt(stats.n)}
+          sub="city × market × day"
+        />
+        <Tile
+          eyebrow="mean |error|"
+          value={`${stats.mean_abs_error.toFixed(2)}°F`}
+          sub={`mean |n σ| ${stats.mean_abs_n_sigma.toFixed(2)}`}
+        />
+        <Tile
+          eyebrow="≥ 2σ misses"
+          value={fmtInt(stats.n_2sigma)}
+          sub={`${(stats.pct_2sigma * 100).toFixed(1)}% (target ≤ 5%)`}
+          tone={stats.pct_2sigma > 0.10 ? 'negative' : stats.pct_2sigma > 0.06 ? 'neutral' : 'positive'}
+        />
+        <Tile
+          eyebrow="≥ 3σ misses"
+          value={fmtInt(stats.n_3sigma)}
+          sub={`${(stats.pct_3sigma * 100).toFixed(1)}% (target ≤ 0.3%)`}
+          tone={stats.n_3sigma > 0 ? 'negative' : 'positive'}
+        />
+      </div>
+
+      <div style={{
+        background: 'var(--ink-deep)',
+        border: '1px solid var(--rule-faint)',
+        borderRadius: 'var(--radius-md)',
+        overflowX: 'auto',
+      }}>
+        <div style={{
+          padding: 'var(--space-3) var(--space-4)',
+          borderBottom: '1px solid var(--rule-faint)',
+        }}>
+          <span className="eyebrow" style={{ color: 'var(--cloud-haze)' }}>
+            worst 10 forecasts · sorted by |n σ|
+          </span>
+        </div>
+        <table style={{
+          width: '100%',
+          borderCollapse: 'collapse',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 'var(--type-small)',
+        }}>
+          <thead>
+            <tr style={{ borderBottom: '1px solid var(--rule-mid)' }}>
+              <th style={{ textAlign: 'left', padding: 'var(--space-2) var(--space-4)',
+                color: 'var(--cloud-mute)', fontWeight: 500, fontSize: 'var(--type-micro)',
+                textTransform: 'uppercase', letterSpacing: '0.10em' }}>city</th>
+              <th style={{ textAlign: 'left', padding: 'var(--space-2) var(--space-4)',
+                color: 'var(--cloud-mute)', fontWeight: 500, fontSize: 'var(--type-micro)',
+                textTransform: 'uppercase', letterSpacing: '0.10em' }}>market</th>
+              <th style={{ textAlign: 'left', padding: 'var(--space-2) var(--space-4)',
+                color: 'var(--cloud-mute)', fontWeight: 500, fontSize: 'var(--type-micro)',
+                textTransform: 'uppercase', letterSpacing: '0.10em' }}>date</th>
+              <th style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)',
+                color: 'var(--cloud-mute)', fontWeight: 500, fontSize: 'var(--type-micro)',
+                textTransform: 'uppercase', letterSpacing: '0.10em' }}>bot μ</th>
+              <th style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)',
+                color: 'var(--cloud-mute)', fontWeight: 500, fontSize: 'var(--type-micro)',
+                textTransform: 'uppercase', letterSpacing: '0.10em' }}>σ</th>
+              <th style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)',
+                color: 'var(--cloud-mute)', fontWeight: 500, fontSize: 'var(--type-micro)',
+                textTransform: 'uppercase', letterSpacing: '0.10em' }}>observed</th>
+              <th style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)',
+                color: 'var(--cloud-mute)', fontWeight: 500, fontSize: 'var(--type-micro)',
+                textTransform: 'uppercase', letterSpacing: '0.10em' }}>error</th>
+              <th style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)',
+                color: 'var(--cloud-mute)', fontWeight: 500, fontSize: 'var(--type-micro)',
+                textTransform: 'uppercase', letterSpacing: '0.10em' }}>n σ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.worst.map((r, i) => {
+              const aNs = Math.abs(r.n_sigma);
+              const ns_color = aNs >= 3 ? 'var(--coral-flare)'
+                             : aNs >= 2 ? 'var(--storm-violet)'
+                             : aNs >= 1 ? 'var(--dawn-amber)'
+                             : 'var(--cloud-haze)';
+              return (
+                <tr key={i} style={{ borderBottom: '1px solid var(--rule-faint)' }}>
+                  <td style={{ textAlign: 'left', padding: 'var(--space-2) var(--space-4)', color: 'var(--cloud-pearl)' }}>
+                    {r.city}
+                  </td>
+                  <td style={{ textAlign: 'left', padding: 'var(--space-2) var(--space-4)', color: 'var(--cloud-mute)',
+                    textTransform: 'uppercase', letterSpacing: '0.04em', fontSize: 'var(--type-micro)' }}>
+                    {r.market_type}
+                  </td>
+                  <td style={{ textAlign: 'left', padding: 'var(--space-2) var(--space-4)', color: 'var(--cloud-mute)' }}>
+                    {r.target_date}
+                  </td>
+                  <td style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)', color: 'var(--cloud-haze)',
+                    fontVariantNumeric: 'tabular-nums' }}>
+                    {Number.isFinite(r.bot_mu) ? r.bot_mu.toFixed(1) : '—'}°
+                  </td>
+                  <td style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)', color: 'var(--cloud-mute)',
+                    fontVariantNumeric: 'tabular-nums' }}>
+                    {Number.isFinite(r.bot_sigma) ? r.bot_sigma.toFixed(1) : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)', color: 'var(--cloud-pearl)',
+                    fontVariantNumeric: 'tabular-nums' }}>
+                    {Number.isFinite(r.observed) ? r.observed.toFixed(1) : '—'}°
+                  </td>
+                  <td style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)',
+                    color: r.error > 0 ? 'var(--dawn-amber)' : r.error < 0 ? 'var(--sky-azure)' : 'var(--cloud-haze)',
+                    fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+                    {Number.isFinite(r.error) ? `${r.error > 0 ? '+' : ''}${r.error.toFixed(1)}°` : '—'}
+                  </td>
+                  <td style={{ textAlign: 'right', padding: 'var(--space-2) var(--space-4)',
+                    color: ns_color, fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+                    {Number.isFinite(r.n_sigma) ? `${r.n_sigma > 0 ? '+' : ''}${r.n_sigma.toFixed(2)}` : '—'}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function Tile({ eyebrow, value, sub, tone = 'neutral' }) {
   const color =
     tone === 'positive' ? 'var(--dawn-gold)'
