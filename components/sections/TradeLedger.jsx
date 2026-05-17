@@ -31,6 +31,9 @@ export default function TradeLedger({ rows = [], freshness }) {
   const [filterType, setFilterType] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterGrade, setFilterGrade] = useState('all');
+  // PATCHER_2026_05_17_STRATEGY: filter by decision strategy
+  // ('edge_gated' | 'down_the_line' | 'all').  Default 'all' shows both.
+  const [filterStrategy, setFilterStrategy] = useState('all');
   const [sort, setSort] = useState({ col: 'decided_at', dir: 'desc' });
   const [expanded, setExpanded] = useState(null);
 
@@ -46,15 +49,20 @@ export default function TradeLedger({ rows = [], freshness }) {
     const s = new Set(rows.map((r) => String(r.grade || ''))); s.delete('');
     return ['all', ...[...s].sort()];
   }, [rows]);
+  const allStrategies = useMemo(() => {
+    const s = new Set(rows.map((r) => String(r.strategy || ''))); s.delete('');
+    return ['all', ...[...s].sort()];
+  }, [rows]);
 
   const filtered = useMemo(() => {
     return rows.filter((r) => {
       if (filterType !== 'all' && String(r.market_type) !== filterType) return false;
       if (filterStatus !== 'all' && String(r.trade_status) !== filterStatus) return false;
       if (filterGrade !== 'all' && String(r.grade) !== filterGrade) return false;
+      if (filterStrategy !== 'all' && String(r.strategy || 'edge_gated') !== filterStrategy) return false;
       return true;
     });
-  }, [rows, filterType, filterStatus, filterGrade]);
+  }, [rows, filterType, filterStatus, filterGrade, filterStrategy]);
 
   const sorted = useMemo(() => {
     const out = [...filtered];
@@ -95,6 +103,7 @@ export default function TradeLedger({ rows = [], freshness }) {
         <FilterGroup label="market" value={filterType} options={allTypes} onChange={setFilterType} />
         <FilterGroup label="status" value={filterStatus} options={allStatuses} onChange={setFilterStatus} />
         <FilterGroup label="grade"  value={filterGrade}  options={allGrades}  onChange={setFilterGrade} />
+        <FilterGroup label="strategy" value={filterStrategy} options={allStrategies} onChange={setFilterStrategy} />
         <div style={S.filterCount}>
           <span className="numeric">
             {fmtInt(sorted.length)}
@@ -114,6 +123,7 @@ export default function TradeLedger({ rows = [], freshness }) {
               <SortHeader label="target / strike" col="target_date"       sort={sort} onClick={toggleSort} align="left" />
               <SortHeader label="side"            col="bet_side"          sort={sort} onClick={toggleSort} align="left" />
               <SortHeader label="grade"           col="grade"             sort={sort} onClick={toggleSort} align="left" />
+              <SortHeader label="strategy"        col="strategy"          sort={sort} onClick={toggleSort} align="left" />
               <SortHeader label="our P"           col="our_prob_cal"      sort={sort} onClick={toggleSort} align="right" />
               <SortHeader label="mkt P"           col="market_prob"       sort={sort} onClick={toggleSort} align="right" />
               <SortHeader label="edge"            col="edge_pct"          sort={sort} onClick={toggleSort} align="right" />
@@ -125,7 +135,7 @@ export default function TradeLedger({ rows = [], freshness }) {
           </thead>
           <tbody>
             {sorted.length === 0 && (
-              <tr><td colSpan={13} style={S.tdEmpty}>No trades match the current filters.</td></tr>
+              <tr><td colSpan={14} style={S.tdEmpty}>No trades match the current filters.</td></tr>
             )}
             {sorted.map((r) => {
               const id = String(r.trade_id);
@@ -192,6 +202,11 @@ function Row({ r, isOpen, pnlColor, onToggle }) {
         <td style={S.tdLeft}>
           {r.grade && <StatusPill value="open" size="compact">{r.grade}</StatusPill>}
         </td>
+        <td style={S.tdLeft}>
+          <span style={{ fontSize: 11, color: r.strategy === 'down_the_line' ? 'var(--dawn-gold)' : 'var(--cloud-mute)' }}>
+            {r.strategy === 'down_the_line' ? 'DTL' : r.strategy === 'edge_gated' ? 'EG' : (r.strategy || '—')}
+          </span>
+        </td>
         <td style={S.tdRight}>{fmtProb(r.our_prob_cal)}</td>
         <td style={S.tdRight}>{fmtProb(r.market_prob)}</td>
         <td style={{ ...S.tdRight, color: edgeColor(r.edge_pct) }}>{fmtPctNumber(r.edge_pct)}</td>
@@ -215,7 +230,7 @@ function Row({ r, isOpen, pnlColor, onToggle }) {
       </tr>
       {isOpen && (
         <tr style={{ background: 'var(--ink-mid)' }}>
-          <td colSpan={13} style={S.expandCell}>
+          <td colSpan={14} style={S.expandCell}>
             <div style={S.expandGrid}>
               <Detail label="trade id"           value={r.trade_id} mono />
               <Detail label="ticker"             value={r.ticker} mono />
