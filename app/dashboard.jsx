@@ -41,6 +41,7 @@ import { useEffect, useState } from 'react';
 // pointing at the project root.
 import Bankroll            from '@/components/sections/Bankroll';
 import WeatherMap          from '@/components/sections/WeatherMap';
+import ForecastVsSettled   from '@/components/sections/ForecastVsSettled';
 import Oracle              from '@/components/sections/Oracle';
 import CalibrationPipeline from '@/components/sections/CalibrationPipeline';
 import DecisionsRendered   from '@/components/sections/DecisionsRendered';
@@ -164,6 +165,12 @@ export default function Dashboard() {
             thresholds: mapThresholds,
           }}
           freshness={fresh('map')}
+        />
+
+        {/* 1b. Hindsight — predicted vs settled per city, last 21 days */}
+        <ForecastVsSettled
+          rows={sections.forecast_vs_settled || []}
+          freshness={fresh('forecast_vs_settled')}
         />
 
         {/* 2. Model honesty (calibration deciles) */}
