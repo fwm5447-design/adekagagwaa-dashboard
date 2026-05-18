@@ -203,8 +203,8 @@ function Row({ r, isOpen, pnlColor, onToggle }) {
           {r.grade && <StatusPill value="open" size="compact">{r.grade}</StatusPill>}
         </td>
         <td style={S.tdLeft}>
-          <span style={{ fontSize: 11, color: r.strategy === 'down_the_line' ? 'var(--dawn-gold)' : 'var(--cloud-mute)' }}>
-            {r.strategy === 'down_the_line' ? 'DTL' : r.strategy === 'edge_gated' ? 'EG' : (r.strategy || '—')}
+          <span style={{ fontSize: 11, color: strategyLabel(r.strategy).color }}>
+            {strategyLabel(r.strategy).text}
           </span>
         </td>
         <td style={S.tdRight}>{fmtProb(r.our_prob_cal)}</td>
@@ -329,6 +329,35 @@ function Detail({ label, value, mono = false, tone }) {
 }
 
 // ── Market-shape helpers ─────────────────────────────────────────────
+
+// Strategy label + color.  Maps the strategy column (set by the bot
+// when it writes the trade) to a short display label.  The v2
+// decision engine stamps 'decision_v2' on every row it produces;
+// the tier (down_the_line vs focused_*) is implicit since DTL is
+// the v2 default.  Older bot versions stamped 'down_the_line'
+// directly, so accept both.
+function strategyLabel(s) {
+  switch (s) {
+    case 'decision_v2':
+    case 'down_the_line':
+      return { text: 'DTL', color: 'var(--dawn-gold)' };
+    case 'focused_conservative':
+    case 'focused_standard':
+    case 'focused_aggressive':
+    case 'conservative':
+    case 'standard':
+    case 'aggressive':
+      return { text: 'FOCUSED', color: 'var(--sky-mist)' };
+    case 'edge_gated':
+      return { text: 'EG', color: 'var(--cloud-mute)' };
+    case null:
+    case undefined:
+    case '':
+      return { text: '—', color: 'var(--cloud-mute)' };
+    default:
+      return { text: String(s), color: 'var(--cloud-mute)' };
+  }
+}
 
 function isRainm(r) {
   return String(r.market_type || '').toLowerCase() === 'rainm';
