@@ -42,16 +42,20 @@ export default function ForecastVsSettled({ rows, freshness }) {
   const allRows  = useMemo(() => Array.isArray(rows) ? rows : [], [rows]);
   const [marketType, setMarketType] = useState('high');
 
-  // Filter to active market type, then group by city.
+  // Filter to active market type, then group by city.  We key the
+  // map by a normalized form (trimmed + lowercased) so a stray
+  // whitespace or casing difference in the DB doesn't drop a city
+  // from the grid.  CITY_ORDER's labels go through the same
+  // normalization at lookup time.
   const byCity = useMemo(() => {
     const m = new Map();
     for (const r of allRows) {
       if (String(r.market_type || '').toLowerCase() !== marketType) continue;
-      const city = String(r.city || '');
-      if (!city) continue;
-      const arr = m.get(city) ?? [];
+      const key = cityKey(r.city);
+      if (!key) continue;
+      const arr = m.get(key) ?? [];
       arr.push(r);
-      m.set(city, arr);
+      m.set(key, arr);
     }
     return m;
   }, [allRows, marketType]);
@@ -163,7 +167,7 @@ export default function ForecastVsSettled({ rows, freshness }) {
           <CityTile
             key={city}
             city={city}
-            rows={byCity.get(city) || []}
+            rows={byCity.get(cityKey(city)) || []}
             yLo={yRange.lo}
             yHi={yRange.hi}
             xDates={xDates}
@@ -410,6 +414,10 @@ function Legend() {
 // ─────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
+function cityKey(name) {
+  if (name == null) return '';
+  return String(name).trim().toLowerCase();
+}
 function num(v) {
   if (v == null) return null;
   const n = Number(v);
