@@ -9,18 +9,21 @@ import SectionFrame from '../layout/SectionFrame';
 import StatusPill from '../primitives/StatusPill';
 
 /**
- * DecisionsRendered — analytics.mv_signals_funnel_30d (dedup'd in
- * migration 040).
+ * DecisionsRendered — analytics.mv_decisions_v2_funnel_30d.
  *
  * Counterpart to the Oracle: where the Oracle asks "was the bot's
  * confidence well-calibrated", this section asks "was the bot's
  * gatekeeper logic well-tuned".
  *
- * One row in the source MV per (decision, market_type) — aggregated
- * across all distinct (market_id, target_date) tuples for which the
- * bot's LATEST decision was that code on that market type.  n_signals
- * is the count of those distinct decisions (3,200 over 30d on May
- * 2026), NOT the raw signal-emission count (which inflates 100-200×).
+ * Source MV (migration 050, 2026-05-18): one row per
+ * (decision_code, market_type) -- aggregated across distinct
+ * (market_id, target_date) tuples where the engine's LATEST decision
+ * was that code on that market type.  decision_code is 'TRADE' or
+ * the first token of pass_reason (G3_CLI_BOUNDARY, G4_FEE_DEATH_ZONE,
+ * G5_INSUFFICIENT_KELLY, etc. -- see core/decision/gates.py).
+ *
+ * Replaces the previous mv_signals_funnel_30d view (now deprecated)
+ * which used the legacy SKIP_* codes from analyzer.analyze().
  *
  * Hierarchy:
  *
@@ -29,13 +32,13 @@ import StatusPill from '../primitives/StatusPill';
  *   2. Breakdown tiles — total decisions / taken / skipped / realized.
  *
  *   3. Decision distribution — horizontal bars per (decision,
- *      market_type), colored by skip-family (action / edge / structure
- *      / disagreement / data-quality / model-quality).
+ *      market_type), colored by gate family (action / forecast /
+ *      structure / cli / kelly / market / fees).
  *
- *   4. Threshold scrutiny — sortable table of SKIP buckets ordered by
- *      mean_edge_pct desc.  Buckets with high mean edge are
- *      candidates for threshold loosening; buckets with low edge are
- *      threshold-correct.
+ *   4. Threshold scrutiny — sortable table of PASS buckets ordered by
+ *      regret_rate desc.  High regret_rate means the gate kept us out
+ *      of bets the engine would have won; candidates for loosening.
+ *      Low regret_rate means the gate correctly saved us from losers.
  *
  *   5. Trade outcomes — focused TRADE-decision summary with realized
  *      win rate and pnl per market_type.
@@ -80,29 +83,37 @@ export default function DecisionsRendered({ rows = [], freshness }) {
         return {
           decision,
           market_type: String(r.market_type || '?'),
-          label: `${decision.replace(/^SKIP_/, '')} · ${r.market_type}`,
+          // Strip both the legacy SKIP_ prefix (if any rows still
+          // carry it during a transition window) and the v2 G#_ prefix
+          // so the bar label is human-readable: 'CLI_BOUNDARY · high'
+          label: `${decision.replace(/^(SKIP_|G\d_)/, '')} · ${r.market_type}`,
           n: Number(r.n_signals) || 0,
           n_taken: Number(r.n_taken) || 0,
           n_skipped: Number(r.n_skipped) || 0,
-          mean_edge: Number(r.mean_edge_pct),
-          mean_our:  Number(r.mean_our_prob),
+          mean_edge: Number(r.mean_edge_pct),   // aliased: actually p_lcb × 100
+          mean_our:  Number(r.mean_our_prob),   // aliased: actually p_yes_cal
           mean_mkt:  Number(r.mean_market_prob),
           mean_conf: Number(r.mean_confidence),
           n_with_cf: Number(r.n_with_cf) || 0,
           cf_win:    Number(r.cf_win_rate),
           cf_pnl:    Number(r.cf_total_pnl),
+          // v2-native fields for regret-based verdict
+          n_regret_misses:       Number(r.n_regret_misses) || 0,
+          n_resolved_for_regret: Number(r.n_resolved_for_regret) || 0,
           family,
         };
       })
       .sort((a, b) => b.n - a.n);
   }, [rows]);
 
-  // ── Skip-only buckets, sorted by mean_edge desc (over-cautious first)
+  // ── PASS-only buckets, sorted by p_lcb desc (highest-conviction
+  //    refusals first -- those are the loosening candidates).
+  //    Under v2, decision codes are 'TRADE' or 'G1..G7' (or PASS_OTHER /
+  //    G0_NO_FORECAST) -- everything that isn't TRADE is a pass.
   const skipScrutiny = useMemo(() => {
     return distribution
-      .filter((d) => d.decision.startsWith('SKIP'))
+      .filter((d) => d.decision !== 'TRADE')
       .sort((a, b) => {
-        // NULL edge_pct (data-quality skips) sort to the bottom.
         const ae = Number.isFinite(a.mean_edge) ? a.mean_edge : -Infinity;
         const be = Number.isFinite(b.mean_edge) ? b.mean_edge : -Infinity;
         return be - ae;
@@ -123,7 +134,7 @@ export default function DecisionsRendered({ rows = [], freshness }) {
       id="decisions"
       invocation="Decisions Rendered & Withheld"
       title="Decisions Rendered & Withheld"
-      subtitle="The gatekeeper layer.  Every (market, day) the analyzer evaluates ends in one decision — take, or one of a dozen named refusals.  This view is the gatekeeper's annual review: how often it acted, how often it withheld, and whether the trades that survived its gates made money."
+      subtitle="The gatekeeper layer.  Every (market, day) the engine evaluates ends in one decision — TRADE, or a named gate refusal (G1..G7).  This view is the gatekeeper's annual review: how often it acted, how often it withheld, and — critically — for each gate, how often the side it considered would actually have won (the regret rate).  Replaces the legacy SKIP_* funnel with the v2 decision pipeline (mig 050)."
       freshnessAt={freshness}
       freshnessCadenceSec={3600 /* hourly refresh */}
     >
@@ -168,11 +179,11 @@ export default function DecisionsRendered({ rows = [], freshness }) {
               <div className="eyebrow">Decisions by reason × market type · last 30 days</div>
               <div style={S.legend}>
                 <FamilyKey family="action"    label="trade" />
-                <FamilyKey family="edge"      label="edge gate" />
-                <FamilyKey family="structure" label="market structure" />
-                <FamilyKey family="disagree"  label="model disagreement" />
-                <FamilyKey family="model"     label="model quality" />
-                <FamilyKey family="data"      label="missing data" />
+                <FamilyKey family="forecast"  label="forecast (G1)" />
+                <FamilyKey family="structure" label="signal quality (G2/G3)" />
+                <FamilyKey family="market"    label="microstructure (G4)" />
+                <FamilyKey family="kelly"     label="conviction (G5)" />
+                <FamilyKey family="sizing"    label="portfolio (G6/G7)" />
               </div>
             </div>
             <ResponsiveContainer width="100%" height={Math.max(320, distribution.length * 22)}>
@@ -227,32 +238,39 @@ export default function DecisionsRendered({ rows = [], freshness }) {
             </div>
           )}
 
-          {/* ── 5. Skip scrutiny table ─────────────────────────────── */}
+          {/* ── 5. Gate scrutiny table ─────────────────────────────── */}
           <div style={S.tableCard}>
             <div style={S.tableHeader}>
               <div className="eyebrow" style={{ color: 'var(--cloud-haze)' }}>
-                Skip thresholds · sorted by mean edge (over-cautious first)
+                Gate scrutiny · sorted by p_lcb (highest-conviction refusals first)
               </div>
             </div>
             <table style={S.table}>
               <thead>
                 <tr style={S.theadRow}>
-                  <th style={S.thLeft}>Reason</th>
+                  <th style={S.thLeft}>Gate</th>
                   <th style={S.thLeft}>Market</th>
                   <th style={S.thRight}>n</th>
-                  <th style={S.thRight}>mean edge</th>
-                  <th style={S.thRight}>our P / mkt P</th>
-                  <th style={S.thRight}>n w/ position</th>
-                  <th style={S.thRight}>realized</th>
+                  <th style={S.thRight}>p_lcb</th>
+                  <th style={S.thRight}>p_cal</th>
+                  <th style={S.thRight}>n resolved</th>
+                  <th style={S.thRight}>regret %</th>
                   <th style={S.thRight}>verdict</th>
                 </tr>
               </thead>
               <tbody>
                 {skipScrutiny.length === 0 && (
-                  <tr><td colSpan={8} style={S.tdEmpty}>No skip decisions in the window.</td></tr>
+                  <tr><td colSpan={8} style={S.tdEmpty}>No gate refusals in the window.</td></tr>
                 )}
                 {skipScrutiny.map((d, i) => {
                   const verdict = skipVerdict(d);
+                  // mean_edge is aliased to (p_lcb × 100) in the v2
+                  // query.  Convert back to a 0..1 fraction for display.
+                  const pLcb = Number.isFinite(d.mean_edge) ? d.mean_edge / 100 : null;
+                  const pCal = Number.isFinite(d.mean_our) ? d.mean_our : null;
+                  const nRes = Number(d.n_resolved_for_regret) || 0;
+                  const nMis = Number(d.n_regret_misses) || 0;
+                  const regret = nRes > 0 ? nMis / nRes : null;
                   return (
                     <tr key={i} style={S.tbodyRow}>
                       <td style={S.tdLeft}>
@@ -262,23 +280,23 @@ export default function DecisionsRendered({ rows = [], freshness }) {
                         {d.market_type}
                       </td>
                       <td style={S.tdRight}>{fmtInt(d.n)}</td>
-                      <td style={{ ...S.tdRight, color: edgeTone(d.mean_edge).fg, fontWeight: 600 }}>
-                        {Number.isFinite(d.mean_edge) ? `${d.mean_edge.toFixed(1)}%` : '—'}
+                      <td style={{ ...S.tdRight, color: lcbTone(pLcb).fg, fontWeight: 600 }}>
+                        {pLcb != null ? `${(pLcb * 100).toFixed(1)}%` : '—'}
                       </td>
                       <td style={{ ...S.tdRight, color: 'var(--cloud-mute)' }}>
-                        {Number.isFinite(d.mean_our) ? d.mean_our.toFixed(2) : '—'}
-                        {' / '}
-                        {Number.isFinite(d.mean_mkt) ? d.mean_mkt.toFixed(2) : '—'}
+                        {pCal != null ? pCal.toFixed(2) : '—'}
                       </td>
-                      <td style={S.tdRight}>{d.n_with_cf > 0 ? fmtInt(d.n_with_cf) : '—'}</td>
+                      <td style={S.tdRight}>{nRes > 0 ? fmtInt(nRes) : '—'}</td>
                       <td style={{
                         ...S.tdRight,
-                        color: Number.isFinite(d.cf_pnl)
-                          ? (d.cf_pnl > 0 ? 'var(--dawn-gold)' : d.cf_pnl < 0 ? 'var(--storm-violet)' : 'var(--cloud-mute)')
-                          : 'var(--cloud-shade)',
-                        fontWeight: Number.isFinite(d.cf_pnl) && d.cf_pnl !== 0 ? 600 : 400,
+                        color: regret == null
+                          ? 'var(--cloud-shade)'
+                          : regret >= 0.60 ? 'var(--coral-flare)'
+                          : regret <= 0.40 ? '#7da78d'
+                          : 'var(--cloud-haze)',
+                        fontWeight: regret != null ? 600 : 400,
                       }}>
-                        {Number.isFinite(d.cf_pnl) ? fmtSignedDollar(d.cf_pnl) : '—'}
+                        {regret != null ? `${(regret * 100).toFixed(0)}%` : '—'}
                       </td>
                       <td style={{ ...S.tdRight }}>
                         <span style={{
@@ -301,13 +319,14 @@ export default function DecisionsRendered({ rows = [], freshness }) {
 
           {/* ── Footnote ───────────────────────────────────────────── */}
           <div style={S.footnote}>
-            One row above = one (market × day) the analyzer evaluated.  The bot may revisit the same
-            market every ~2 minutes; only the <em>latest</em> decision counts (mig 040 fix).
-            &ldquo;Realized&rdquo; is the actual pnl on trades opened against this market×day — for
-            SKIP rows that&rsquo;s the regret pnl of positions opened under an earlier TRADE decision then
-            flipped to skip.  <strong style={{ color: 'var(--cloud-haze)' }}>Mean edge</strong> on a
-            SKIP row is the model&rsquo;s view of the edge it left on the table; high values are
-            candidates for loosening the corresponding threshold.
+            One row above = one (market × day) the v2 engine evaluated.  The bot revisits the same
+            market every ~2 minutes; only the <em>latest</em> decision counts (mig 050 dedup).
+            <strong style={{ color: 'var(--cloud-haze)' }}> p_lcb</strong> on a gate row is the
+            engine&rsquo;s 5%-LCB conviction on the side it considered — higher = more confident the
+            engine wanted to bet, so the gate is a loosening candidate.
+            <strong style={{ color: 'var(--cloud-haze)' }}> regret %</strong> is the fraction of resolved
+            markets in this gate&rsquo;s bucket where the side the engine considered actually won.
+            High regret = gate is over-cautious; low regret = gate is correctly saving us.
           </div>
         </>
       )}
@@ -493,33 +512,34 @@ function EmptyState() {
 // Map decision codes to a small set of semantic families.  Drives
 // palette and legend grouping.  Families are visual categories, NOT
 // the same as the underlying skip-reason taxonomy in the analyzer.
+// Family classifier for the v2 gate set (G1..G7 + special cases).
+// See core/decision/gates.py for the canonical gate definitions.
 function familyOf(decision) {
-  if (decision === 'TRADE') return 'action';
-  if (decision === 'SKIP_BRACKET_EDGE'
-   || decision === 'SKIP_BRACKET_SPREAD'
-   || decision === 'SKIP_IN_SPREAD') return 'edge';
-  if (decision === 'SKIP_LIQUIDITY_GRADED'
-   || decision === 'SKIP_TAIL_MARKET') return 'structure';
-  if (decision === 'SKIP_ENSEMBLE_SPREAD'
-   || decision === 'SKIP_DISAGREEMENT_HARD'
-   || decision === 'SKIP_BLEND_DISAGREE'
-   || decision === 'SKIP_MARKET_MODEL_DISAGREE') return 'disagree';
-  if (decision === 'SKIP_CLI_BOUNDARY'
-   || decision === 'SKIP_GRADE_F') return 'model';
-  if (decision === 'SKIP_NO_FORECAST'
-   || decision === 'SKIP_INTRADAY_BIN_COLLAPSED'
-   || decision === 'SKIP_GAUSSIAN_FLOOR') return 'data';
+  if (decision === 'TRADE')               return 'action';
+  if (decision === 'G1_FORECAST_INVALID'
+   || decision === 'G1_RECENT_TAIL_EVENT'
+   || decision === 'G0_NO_FORECAST')      return 'forecast';   // predictor not trusted
+  if (decision === 'G2_SIGMA_TOO_WIDE'
+   || decision === 'G3_CLI_BOUNDARY'
+   || decision === 'G3_DEGENERATE_SIGMA') return 'structure';  // signal-quality refusals
+  if (decision === 'G4_FEE_DEATH_ZONE'
+   || decision === 'G4_NO_QUOTES')        return 'market';     // microstructure
+  if (decision === 'G5_INSUFFICIENT_KELLY'
+   || decision === 'G5_NEGATIVE_KELLY_BOTH_SIDES'
+   || decision === 'PASS_OTHER')          return 'kelly';      // conviction floor
+  if (decision === 'G6_BOOK_DEPTH'
+   || decision === 'G7_PER_CITY_CAP')     return 'sizing';     // post-bet portfolio checks
   return 'other';
 }
 
 function colorOfFamily(family) {
   switch (family) {
     case 'action':    return 'var(--dawn-gold)';
-    case 'edge':      return 'var(--sky-mist)';
-    case 'structure': return 'var(--storm-violet)';
-    case 'disagree':  return 'var(--sky-azure)';
-    case 'model':     return 'var(--storm-deep)';
-    case 'data':      return 'var(--cloud-shade)';
+    case 'forecast':  return 'var(--cloud-shade)';   // predictor (G1)
+    case 'structure': return 'var(--storm-violet)';  // signal quality (G2/G3)
+    case 'market':    return 'var(--sky-mist)';      // microstructure (G4)
+    case 'kelly':     return 'var(--storm-deep)';    // conviction (G5)
+    case 'sizing':    return 'var(--sky-azure)';     // portfolio (G6/G7)
     default:          return 'var(--cloud-mute)';
   }
 }
@@ -553,28 +573,55 @@ function edgeTone(e) {
   return        { fg: 'var(--cloud-mute)' };
 }
 
-// "Verdict" for a skip bucket in the scrutiny table.  Combines mean
-// edge with realized cf_pnl to label the threshold as well-saved,
-// over-cautious, etc.
+// Tone for p_lcb (0..1) in the v2 scrutiny table.  High p_lcb on a
+// PASS row means the engine had strong conviction it should bet --
+// suspicious if the gate kept us out.  Mirrors edgeTone but at the
+// probability scale appropriate for the v2 calibrated output.
+function lcbTone(p) {
+  if (!Number.isFinite(p)) return { fg: 'var(--cloud-shade)' };
+  if (p >= 0.65) return { fg: 'var(--coral-flare)' };  // very confident → loosen
+  if (p >= 0.55) return { fg: 'var(--dawn-amber)' };
+  if (p >= 0.45) return { fg: 'var(--cloud-haze)' };
+  return            { fg: 'var(--cloud-mute)' };
+}
+
+// "Verdict" for a PASS bucket in the scrutiny table.  Driven by
+// regret_rate (the fraction of PASS rows where the considered side
+// actually won the underlying market).  Falls back to p_lcb when
+// not enough resolved markets exist yet.
+//
+//   regret_rate >= 0.60   → over-cautious  (gate is killing winners)
+//   regret_rate <= 0.40   → well-saved     (gate is saving us from losers)
+//   else                  → threshold-correct
+//
+// When regret_rate is null (no resolved markets yet) we still classify
+// by avg_p_lcb -- high p_lcb on a PASS means the engine had strong
+// conviction it should bet, so the gate is borderline candidate-for-
+// loosening.
 function skipVerdict(d) {
-  const e = Number.isFinite(d.mean_edge) ? d.mean_edge : null;
-  const pnl = Number.isFinite(d.cf_pnl) ? d.cf_pnl : null;
-  if (e == null && pnl == null) {
-    return { label: '—', color: 'var(--cloud-shade)' };
-  }
-  if (e != null && e >= 15) {
-    return { label: 'over-cautious', color: 'var(--coral-flare)' };
-  }
-  if (e != null && e >= 8) {
-    return { label: 'borderline', color: 'var(--dawn-amber)' };
-  }
-  if (pnl != null && pnl < -50) {
-    return { label: 'well-saved', color: '#7da78d' };
-  }
-  if (e != null && e < 5) {
+  const nRes = Number(d.n_resolved_for_regret) || 0;
+  const nMiss = Number(d.n_regret_misses) || 0;
+  const regretRate = nRes > 0 ? nMiss / nRes : null;
+  const lcb = Number.isFinite(d.mean_edge) ? d.mean_edge / 100 : null;
+  // mean_edge here = avg_p_lcb × 100 (aliased in SQL), so dividing
+  // by 100 recovers p_lcb in [0, 1].
+  if (regretRate != null) {
+    if (regretRate >= 0.60) {
+      return { label: 'over-cautious', color: 'var(--coral-flare)' };
+    }
+    if (regretRate <= 0.40) {
+      return { label: 'well-saved', color: '#7da78d' };
+    }
     return { label: 'threshold-correct', color: 'var(--cloud-haze)' };
   }
-  return { label: 'wash', color: 'var(--cloud-mute)' };
+  // No regret data yet (gate hasn't been resolved against any market).
+  if (lcb != null && lcb >= 0.55) {
+    return { label: 'borderline · awaiting data', color: 'var(--dawn-amber)' };
+  }
+  if (lcb != null && lcb < 0.30) {
+    return { label: 'low conviction', color: 'var(--cloud-mute)' };
+  }
+  return { label: '—', color: 'var(--cloud-shade)' };
 }
 
 // ─────────────────────────────────────────────────────────────────────
