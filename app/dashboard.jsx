@@ -44,6 +44,7 @@ import WeatherMap          from '@/components/sections/WeatherMap';
 import ForecastVsSettled   from '@/components/sections/ForecastVsSettled';
 import Oracle              from '@/components/sections/Oracle';
 import CalibrationPipeline from '@/components/sections/CalibrationPipeline';
+import ForecastSkill       from '@/components/sections/ForecastSkill';
 import DecisionsRendered   from '@/components/sections/DecisionsRendered';
 import EdgeAndAttribution  from '@/components/sections/EdgeAndAttribution';
 import DataCompleteness    from '@/components/sections/DataCompleteness';
@@ -189,6 +190,12 @@ export default function Dashboard() {
             station_biases:  sections.vigil_biases    || [],
           }}
           freshness={fresh('sources')}
+        />
+
+        {/* 3.5 Per-cell DTL Kelly throttle from rolling MAE */}
+        <ForecastSkill
+          rows={sections.forecast_skill || []}
+          freshness={fresh('forecast_skill')}
         />
 
         {/* 4. Decision funnel */}
