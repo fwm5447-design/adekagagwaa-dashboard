@@ -154,6 +154,13 @@ export default function Dashboard() {
           data={{
             summary: (sections.bankroll_summary && sections.bankroll_summary[0]) || null,
             curve:    sections.bankroll_curve || [],
+            // Live-Fill v2 panel — single row from live_fill_v2 query,
+            // plus the rejection breakdown from live_fill_v2_rejects.
+            // Both default to null/[] so Bankroll renders the "v2
+            // dormant" stub when these queries aren't wired or return
+            // no rows.
+            v2:       (sections.live_fill_v2 && sections.live_fill_v2[0]) || null,
+            v2Rejects: sections.live_fill_v2_rejects || [],
           }}
           freshness={fresh('bankroll_summary')}
         />

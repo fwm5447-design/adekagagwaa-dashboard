@@ -32,6 +32,11 @@ import SectionFrame from '../layout/SectionFrame';
 export default function Bankroll({ data, freshness }) {
   const summary = data?.summary || null;
   const curve   = Array.isArray(data?.curve) ? data.curve : [];
+  // Live-Fill v2 row from the live_fill_v2 query.  Null when v2 hasn't
+  // been activated yet OR the query returned no rows (= no v2 account
+  // seeded).  All downstream renderers treat null as "v2 dormant".
+  const v2      = data?.v2 || null;
+  const v2Rejects = Array.isArray(data?.v2Rejects) ? data.v2Rejects : [];
 
   // ── Derived stats ──────────────────────────────────────────────
   const stats = useMemo(() => {
@@ -299,8 +304,223 @@ export default function Bankroll({ data, freshness }) {
         NAV = starting bankroll + cumulative net P&L on settled trades since the tracking epoch.
         Open positions are <em>at risk</em> but not yet realized — they roll into the curve as they settle.
       </div>
+
+      {/* ── Live-Fill v2 panel ─────────────────────────────────── */}
+      <LiveFillV2Panel v2={v2} rejects={v2Rejects} />
     </SectionFrame>
   );
+}
+
+// ── Live-Fill v2 subpanel ─────────────────────────────────────────
+//
+// Renders the v2 stack's state inside the Bankroll section.  Surfaces:
+//   * Account/mode/env header + safety markers
+//   * Simulated cash + caps utilization
+//   * Trade counts (open / settled)
+//   * CLV alpha-test stats (Phase 1 exit criterion 3)
+//   * Rejection breakdown over the last 24h
+//   * "Last heard from" heartbeat
+//
+// Renders an "inactive" notice when the v2 query returns no row.
+
+function LiveFillV2Panel({ v2, rejects }) {
+  if (!v2) {
+    return (
+      <div style={V2.frame}>
+        <div style={V2.header}>
+          <span style={V2.title}>Live-Fill v2</span>
+          <span style={V2.muted}>dormant — set V2_ENABLED to activate</span>
+        </div>
+      </div>
+    );
+  }
+
+  const cash         = num(v2.cash_cents) / 100;
+  const bankrollCfg  = num(v2.bankroll_config_usd);
+  const cashDelta    = cash - bankrollCfg;
+  const openExp      = num(v2.open_exposure_cents) / 100;
+  const restingOrder = num(v2.resting_order_cents) / 100;
+  const pnlToday     = num(v2.realized_pnl_today_cents) / 100;
+  const nOpen        = num(v2.v2_n_open);
+  const nWon         = num(v2.v2_n_won);
+  const nLost        = num(v2.v2_n_lost);
+  const nSettled     = nWon + nLost + num(v2.v2_n_void);
+  const pnlTotal     = num(v2.v2_pnl_total);
+  const wageredOpen  = num(v2.v2_wagered_open);
+  const wageredSetl  = num(v2.v2_wagered_settled);
+  const clvN         = num(v2.v2_clv_n_with_mid);
+  const clvAvg       = v2.v2_clv_avg == null ? null : Number(v2.v2_clv_avg);
+  const clvPosRate   = clvN > 0 ? num(v2.v2_clv_n_positive) / clvN : null;
+  const nRejected    = num(v2.v2_n_rejected_24h);
+  const lastEventAt  = v2.v2_last_lifecycle_at;
+
+  // Cap utilization — what % of each cap has been consumed?
+  const expCapUsed    = bankrollCfg > 0
+    ? openExp / num(v2.max_open_exposure_usd) : 0;
+  const dailyLossCap  = num(v2.max_daily_loss_usd);
+  const dailyLossUsed = dailyLossCap > 0
+    ? Math.max(0, -pnlToday) / dailyLossCap : 0;
+
+  const lowFundHard   = num(v2.low_fund_hard_usd);
+  const lowFundFloor  = num(v2.low_fund_floor_usd);
+  const cashStatus    =
+    cash < lowFundHard  ? 'critical'
+    : cash < lowFundFloor ? 'warning'
+    : 'healthy';
+  const cashStatusColor = {
+    healthy:  'var(--dawn-gold)',
+    warning:  'var(--cloud-haze)',
+    critical: 'var(--storm-violet)',
+  }[cashStatus];
+
+  return (
+    <div style={V2.frame}>
+      <div style={V2.header}>
+        <span style={V2.title}>Live-Fill v2</span>
+        <span style={V2.subtitle}>
+          {v2.account_id} · {v2.fill_mode} · env={v2.environment} · status={v2.account_status}
+        </span>
+        <span style={V2.heartbeat} title={`last lifecycle event ${lastEventAt}`}>
+          {lastEventAt ? `heartbeat ${ago(lastEventAt)}` : 'no events yet'}
+        </span>
+      </div>
+
+      {/* Row 1: cash + caps */}
+      <div style={V2.tileRow}>
+        <V2Tile
+          label="simulated cash"
+          value={`$${fmtMoney(cash)}`}
+          sub={
+            cashDelta === 0
+              ? `from $${fmtMoney(bankrollCfg)}`
+              : `${fmtSignedMoney(cashDelta)} from $${fmtMoney(bankrollCfg)}`
+          }
+          tone={cashStatus === 'healthy' ? 'neutral' : cashStatus === 'warning' ? 'caution' : 'negative'}
+          accent={cashStatusColor}
+        />
+        <V2Tile
+          label="open exposure"
+          value={`$${fmtMoney(openExp)}`}
+          sub={`${fmtPct(expCapUsed)} of $${fmtMoney(num(v2.max_open_exposure_usd))} cap`}
+          tone={expCapUsed > 0.9 ? 'caution' : 'neutral'}
+        />
+        <V2Tile
+          label="P&L today"
+          value={fmtSignedMoney(pnlToday)}
+          sub={`${fmtPct(dailyLossUsed)} of $${fmtMoney(dailyLossCap)} loss cap`}
+          tone={pnlToday > 0 ? 'positive' : pnlToday < 0 ? 'caution' : 'neutral'}
+        />
+        <V2Tile
+          label="resting orders"
+          value={`$${fmtMoney(restingOrder)}`}
+          sub="reserved cash"
+          tone="neutral"
+        />
+      </div>
+
+      {/* Row 2: trades + CLV */}
+      <div style={V2.tileRow}>
+        <V2Tile
+          label="v2 trades"
+          value={`${fmtInt(nOpen)} open · ${fmtInt(nSettled)} settled`}
+          sub={
+            nSettled > 0
+              ? `${fmtInt(nWon)}W · ${fmtInt(nLost)}L · ${fmtSignedMoney(pnlTotal)}`
+              : 'awaiting settler'
+          }
+          tone={pnlTotal > 0 ? 'positive' : pnlTotal < 0 ? 'negative' : 'neutral'}
+        />
+        <V2Tile
+          label="v2 wagered"
+          value={`$${fmtMoney(wageredOpen + wageredSetl)}`}
+          sub={`open $${fmtMoney(wageredOpen)} · settled $${fmtMoney(wageredSetl)}`}
+          tone="neutral"
+        />
+        <V2Tile
+          label="CLV alpha"
+          value={clvN === 0 ? '—' : fmtSignedMoney(clvAvg ?? 0)}
+          sub={
+            clvN === 0
+              ? 'awaiting close-window captures'
+              : `n=${fmtInt(clvN)} · ${fmtPct(clvPosRate ?? 0)} positive`
+          }
+          tone={clvAvg == null ? 'neutral' : clvAvg > 0 ? 'positive' : 'negative'}
+        />
+        <V2Tile
+          label="rejected 24h"
+          value={fmtInt(nRejected)}
+          sub={
+            nRejected > 0
+              ? `${fmtInt(num(v2.v2_reject_reasons))} distinct reasons`
+              : 'no rejections'
+          }
+          tone={nRejected > 100 ? 'caution' : 'neutral'}
+        />
+      </div>
+
+      {/* Rejection breakdown */}
+      {rejects.length > 0 && (
+        <div style={V2.rejectList}>
+          <div className="eyebrow" style={V2.rejectHeader}>
+            rejection reasons (24h)
+          </div>
+          <table style={V2.rejectTable}>
+            <thead>
+              <tr>
+                <th style={V2.rejectTh}>reason</th>
+                <th style={{ ...V2.rejectTh, textAlign: 'right' }}>n</th>
+                <th style={{ ...V2.rejectTh, textAlign: 'right' }}>most recent</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rejects.slice(0, 8).map((r) => (
+                <tr key={r.rejection_reason}>
+                  <td style={V2.rejectTd}>{r.rejection_reason}</td>
+                  <td style={{ ...V2.rejectTd, textAlign: 'right' }}>{fmtInt(r.n)}</td>
+                  <td style={{ ...V2.rejectTd, textAlign: 'right', color: 'var(--cloud-mute)' }}>
+                    {ago(r.last_at)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div style={V2.footnote}>
+        v2 is in <strong>{v2.fill_mode}</strong> mode — fills are simulated, not real Kalshi orders.
+        Phase 1 exit criteria (plan §22.6): plumbing stable for 14 days, CLV positive on grade A-C
+        trades for ≥7 days, every rejection rule fires at least once.
+      </div>
+    </div>
+  );
+}
+
+function V2Tile({ label, value, sub, tone = 'neutral', accent }) {
+  const color = accent || ({
+    positive: 'var(--dawn-gold)',
+    negative: 'var(--storm-violet)',
+    caution:  'var(--cloud-haze)',
+    neutral:  'var(--cloud-pearl)',
+  }[tone]);
+  return (
+    <div style={V2.tile}>
+      <div className="eyebrow" style={{ color: 'var(--cloud-mute)' }}>{label}</div>
+      <div className="numeric" style={{ ...V2.tileValue, color }}>{value}</div>
+      {sub && <div style={V2.tileSub}>{sub}</div>}
+    </div>
+  );
+}
+
+function ago(iso) {
+  if (!iso) return '—';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '—';
+  const dt = (Date.now() - t) / 1000;
+  if (dt < 60)    return `${Math.round(dt)}s ago`;
+  if (dt < 3600)  return `${Math.round(dt / 60)}m ago`;
+  if (dt < 86400) return `${Math.round(dt / 3600)}h ago`;
+  return `${Math.round(dt / 86400)}d ago`;
 }
 
 // ── Subcomponents ─────────────────────────────────────────────────
@@ -467,6 +687,113 @@ const S = {
     fontSize: 'var(--type-small)',
     color: 'var(--cloud-mute)',
     maxWidth: '70ch',
+    lineHeight: 1.6,
+  },
+};
+
+const V2 = {
+  frame: {
+    background: 'var(--ink-deep)',
+    border: '1px solid var(--rule-faint)',
+    borderRadius: 'var(--radius-md)',
+    padding: 'var(--space-4)',
+    marginTop: 'var(--space-5)',
+  },
+  header: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 'var(--space-4)',
+    flexWrap: 'wrap',
+    marginBottom: 'var(--space-4)',
+    paddingBottom: 'var(--space-2)',
+    borderBottom: '1px solid var(--rule-faint)',
+  },
+  title: {
+    fontFamily: 'var(--font-display)',
+    fontStyle: 'italic',
+    fontSize: 'var(--type-h3)',
+    color: 'var(--cloud-pearl)',
+    letterSpacing: '-0.01em',
+  },
+  subtitle: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 'var(--type-small)',
+    color: 'var(--cloud-mute)',
+    flex: 1,
+  },
+  heartbeat: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 'var(--type-micro)',
+    color: 'var(--cloud-mute)',
+  },
+  muted: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 'var(--type-small)',
+    color: 'var(--cloud-mute)',
+    fontStyle: 'italic',
+  },
+  tileRow: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, 1fr)',
+    gap: 'var(--space-3)',
+    marginBottom: 'var(--space-3)',
+  },
+  tile: {
+    background: 'var(--ink-night, #0c0c0c)',
+    border: '1px solid var(--rule-faint)',
+    borderRadius: 'var(--radius-sm)',
+    padding: 'var(--space-3)',
+    minHeight: 80,
+  },
+  tileValue: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 'var(--type-h3)',
+    fontWeight: 500,
+    marginTop: 'var(--space-1)',
+    marginBottom: 'var(--space-1)',
+    letterSpacing: '-0.01em',
+  },
+  tileSub: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: 'var(--type-micro)',
+    color: 'var(--cloud-mute)',
+  },
+  rejectList: {
+    marginTop: 'var(--space-3)',
+    background: 'var(--ink-night, #0c0c0c)',
+    border: '1px solid var(--rule-faint)',
+    borderRadius: 'var(--radius-sm)',
+    padding: 'var(--space-3)',
+  },
+  rejectHeader: {
+    color: 'var(--cloud-mute)',
+    marginBottom: 'var(--space-2)',
+  },
+  rejectTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 'var(--type-small)',
+  },
+  rejectTh: {
+    textAlign: 'left',
+    fontWeight: 400,
+    color: 'var(--cloud-mute)',
+    fontSize: 'var(--type-micro)',
+    padding: '2px 8px',
+    borderBottom: '1px solid var(--rule-faint)',
+  },
+  rejectTd: {
+    padding: '4px 8px',
+    color: 'var(--cloud-haze)',
+  },
+  footnote: {
+    marginTop: 'var(--space-3)',
+    fontFamily: 'var(--font-display)',
+    fontStyle: 'italic',
+    fontSize: 'var(--type-small)',
+    color: 'var(--cloud-mute)',
+    maxWidth: '78ch',
     lineHeight: 1.6,
   },
 };
