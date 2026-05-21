@@ -241,7 +241,7 @@ function Row({ r, isOpen, pnlColor, onToggle }) {
               <Detail label="p10 – p90"          value={quantileLine} />
               <Detail label="p50"                value={fmtNumeric(r.predictive_quantile_p50, 2)} />
               <Detail label="confidence"         value={fmtNumeric(r.confidence, 3)} />
-              <Detail label="intent price · ¢"   value={fmtNumeric(r.intent_price, 0)} />
+              <Detail label="intent price"       value={fmtNumeric(r.intent_price, 2)} />
               <Detail label="CLV · ¢"            value={fmtSignedNumeric(r.clv_cents, 1)} />
               <Detail label="actual"             value={fmtNumeric(r.actual_value, 2)} />
               <Detail label="won"                value={r.won == null ? '—' : (r.won ? 'yes' : 'no')} />
