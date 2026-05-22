@@ -421,7 +421,12 @@ function fmtStrikeLabel(r) {
   if (lo != null && hi != null) return `${lo.toFixed(0)}–${hi.toFixed(0)}°F`;
   if (lo == null)               return '?';
   if (mt === 'low') {
-    const dir = String(r.low_direction || 'below').toLowerCase();
+    // Default "above" per the 2026-05-22 Kalshi-spec audit: every
+    // LOW-T market on production resolves "if min temp > N → YES".
+    // Earlier default "below" caused 6 settled trades to display
+    // inverted strike labels (showing "<45°F" when contract was
+    // actually ">45°F").
+    const dir = String(r.low_direction || 'above').toLowerCase();
     return `${dir === 'above' ? '>' : '<'}${lo.toFixed(0)}°F`;
   }
   return `>${lo.toFixed(0)}°F`;
@@ -450,7 +455,8 @@ function fmtStrikeLong(r) {
   if (lo != null && hi != null) return `between ${lo.toFixed(1)}°F and ${hi.toFixed(1)}°F`;
   if (lo == null)               return '—';
   if (mt === 'low') {
-    const dir = String(r.low_direction || 'below').toLowerCase();
+    // Default "above" — see fmtStrikeLabel for context.
+    const dir = String(r.low_direction || 'above').toLowerCase();
     return `${dir} ${lo.toFixed(1)}°F`;
   }
   return `above ${lo.toFixed(1)}°F`;
