@@ -46,7 +46,10 @@ export default function TradeLedger({ rows = [], freshness }) {
     return ['all', ...[...s].sort()];
   }, [rows]);
   const allGrades = useMemo(() => {
-    const s = new Set(rows.map((r) => String(r.grade || ''))); s.delete('');
+    // Use displayGrade so legacy 'DECISION_V2' marker rows don't
+    // pollute the filter dropdown with a non-grade option.
+    const s = new Set(rows.map((r) => displayGrade(r.grade) || ''));
+    s.delete('');
     return ['all', ...[...s].sort()];
   }, [rows]);
   const allStrategies = useMemo(() => {
@@ -58,7 +61,7 @@ export default function TradeLedger({ rows = [], freshness }) {
     return rows.filter((r) => {
       if (filterType !== 'all' && String(r.market_type) !== filterType) return false;
       if (filterStatus !== 'all' && String(r.trade_status) !== filterStatus) return false;
-      if (filterGrade !== 'all' && String(r.grade) !== filterGrade) return false;
+      if (filterGrade !== 'all' && displayGrade(r.grade) !== filterGrade) return false;
       if (filterStrategy !== 'all' && String(r.strategy || 'edge_gated') !== filterStrategy) return false;
       return true;
     });
@@ -200,7 +203,9 @@ function Row({ r, isOpen, pnlColor, onToggle }) {
         </td>
         <td style={S.tdLeft}>{r.bet_side || '—'}</td>
         <td style={S.tdLeft}>
-          {r.grade && <StatusPill value="open" size="compact">{r.grade}</StatusPill>}
+          {displayGrade(r.grade) && (
+            <StatusPill value="open" size="compact">{displayGrade(r.grade)}</StatusPill>
+          )}
         </td>
         <td style={S.tdLeft}>
           <span style={{ fontSize: 11, color: strategyLabel(r.strategy).color }}>
@@ -329,6 +334,23 @@ function Detail({ label, value, mono = false, tone }) {
 }
 
 // ── Market-shape helpers ─────────────────────────────────────────────
+
+// Grade display helper.  The trades.grade column should hold a
+// per-trade conviction letter (A/B/C/D/F) — but the legacy paper-
+// trader's execute_v2 path historically hardcoded "DECISION_V2" as
+// the grade value (a strategy marker conflated into the grade
+// column; see core/paper_trader.py history).  Newer v2-routed
+// trades correctly use A/B/C from _TIER_TO_GRADE.
+//
+// Without filtering, the dashboard rendered "DECISION_V2" as a
+// grade pill on every historical row, which is misleading.  This
+// helper returns the raw grade only when it's a real letter; else
+// null so the pill falls through and the column reads "—".
+const _VALID_GRADES = new Set(['A', 'B', 'C', 'D', 'F']);
+function displayGrade(raw) {
+  const g = String(raw || '').toUpperCase();
+  return _VALID_GRADES.has(g) ? g : null;
+}
 
 // Strategy label + color.  Maps the strategy column (set by the bot
 // when it writes the trade) to a short display label.  The v2
