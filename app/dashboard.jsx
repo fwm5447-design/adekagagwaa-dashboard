@@ -49,6 +49,7 @@ import DecisionsRendered   from '@/components/sections/DecisionsRendered';
 import EdgeAndAttribution  from '@/components/sections/EdgeAndAttribution';
 import DataCompleteness    from '@/components/sections/DataCompleteness';
 import OperationalPulse    from '@/components/sections/OperationalPulse';
+import BotHealth           from '@/components/sections/BotHealth';
 import TradeLedger         from '@/components/sections/TradeLedger';
 
 
@@ -230,6 +231,23 @@ export default function Dashboard() {
         <OperationalPulse
           rows={sections.health || []}
           freshness={fresh('health')}
+        />
+
+        {/* 8. Bot-state observability — 2026-05-23 audit
+            (forecast drift, EV drift, orphan + stuck settlements) */}
+        <BotHealth
+          data={{
+            forecastDrift: sections.health_forecast_drift     || [],
+            pnlDrift:      sections.health_pnl_drift          || [],
+            orphans:       sections.health_orphan_settlements || [],
+            stuck:         sections.health_stuck_unsettled    || [],
+          }}
+          freshness={
+            fresh('health_forecast_drift')
+            || fresh('health_pnl_drift')
+            || fresh('health_orphan_settlements')
+            || fresh('health_stuck_unsettled')
+          }
         />
 
         {/* 10. Trade ledger — densest, bottom */}

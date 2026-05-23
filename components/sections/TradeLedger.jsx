@@ -31,8 +31,12 @@ export default function TradeLedger({ rows = [], freshness }) {
   const [filterType, setFilterType] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterGrade, setFilterGrade] = useState('all');
-  // PATCHER_2026_05_17_STRATEGY: filter by decision strategy
-  // ('edge_gated' | 'down_the_line' | 'all').  Default 'all' shows both.
+  // Filter by decision strategy.  Values seen in practice:
+  //   * 'decision_v2'  — current primary (unified strategy, since 2026-05-23)
+  //   * 'down_the_line'/'edge_gated' — historical (pre-unified)
+  //   * 'focused_*' — pre-unified FOCUSED tier (rare, mostly legacy)
+  // Default 'all' shows everything; the filter values are populated
+  // dynamically from data so the user only sees options that exist.
   const [filterStrategy, setFilterStrategy] = useState('all');
   const [sort, setSort] = useState({ col: 'decided_at', dir: 'desc' });
   const [expanded, setExpanded] = useState(null);
