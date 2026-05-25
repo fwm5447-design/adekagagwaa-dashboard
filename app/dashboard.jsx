@@ -50,6 +50,7 @@ import EdgeAndAttribution  from '@/components/sections/EdgeAndAttribution';
 import DataCompleteness    from '@/components/sections/DataCompleteness';
 import OperationalPulse    from '@/components/sections/OperationalPulse';
 import BotHealth           from '@/components/sections/BotHealth';
+import Mentions            from '@/components/sections/Mentions';
 import TradeLedger         from '@/components/sections/TradeLedger';
 
 
@@ -247,6 +248,27 @@ export default function Dashboard() {
             || fresh('health_pnl_drift')
             || fresh('health_orphan_settlements')
             || fresh('health_stuck_unsettled')
+          }
+        />
+
+        {/* 9. Mentions markets — Kalshi mention-strike Bayesian bandit
+            (bot repo migrations 063-074, docs/mentions_markets_plan.md).
+            Paper-mode until 7-day / 5-winning-days gate trips. */}
+        <Mentions
+          data={{
+            universe:          sections.mentions_universe          || [],
+            daily:             sections.mentions_daily             || [],
+            priors:            sections.mentions_priors            || [],
+            decisions:         sections.mentions_recent_decisions  || [],
+            trades:            sections.mentions_trades            || [],
+            brands:            sections.mentions_brands            || [],
+            calibration:       sections.mentions_calibration       || [],
+            corpus_freshness:  sections.mentions_corpus_freshness  || [],
+          }}
+          freshness={
+            fresh('mentions_universe')
+            || fresh('mentions_daily')
+            || fresh('mentions_priors')
           }
         />
 
