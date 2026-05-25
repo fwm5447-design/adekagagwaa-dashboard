@@ -170,11 +170,14 @@ export default function TradeLedger({ rows = [], freshness }) {
 }
 
 function Row({ r, isOpen, pnlColor, onToggle }) {
-  const targetShort   = fmtTargetShort(r);
-  const strikeShort   = fmtStrikeLabel(r);
-  const strikeLong    = fmtStrikeLong(r);
-  const forecast      = fmtForecastCell(r);
-  const favorable     = forecastFavorable(r);
+  const mention       = isMention(r);
+  const tickerForMention = String(r.ticker || r.market_id || '');
+  const targetShort   = mention ? mentionSeriesShort(tickerForMention) : fmtTargetShort(r);
+  const strikeShort   = mention ? mentionStrikeWord(tickerForMention)  : fmtStrikeLabel(r);
+  const strikeLong    = mention ? (mentionStrikeWord(tickerForMention) + ' · ' + tickerForMention) : fmtStrikeLong(r);
+  const cityCell      = mention ? (mentionEventShort(tickerForMention) || '—') : (r.city || '—');
+  const forecast      = mention ? { line1: '—', line2: null } : fmtForecastCell(r);
+  const favorable     = mention ? null : forecastFavorable(r);
   const forecastColor =
     favorable === true  ? 'var(--dawn-gold)' :
     favorable === false ? 'var(--storm-violet)' :
@@ -196,7 +199,7 @@ function Row({ r, isOpen, pnlColor, onToggle }) {
           </span>
         </td>
         <td style={S.tdLeft}>{r.market_type || '—'}</td>
-        <td style={S.tdLeft}>{r.city || '—'}</td>
+        <td style={S.tdLeft}>{cityCell}</td>
         <td style={S.tdLeft}>
           <div style={S.stackedCell}>
             <span className="numeric" style={{ fontSize: 11 }}>
@@ -387,6 +390,62 @@ function strategyLabel(s) {
 
 function isRainm(r) {
   return String(r.market_type || '').toLowerCase() === 'rainm';
+}
+
+// ── Mention market helpers ─────────────────────────────────────────
+// Parse KXSERIES-EVENT-STRIKE tickers into display labels so the
+// city / target / strike cells aren't empty for mention paper trades
+// (which don't carry city/threshold/forecast).
+
+function isMention(r) {
+  return String(r.market_type || '').toLowerCase() === 'mention';
+}
+
+// Map ticker prefix → display series name.
+const MENTION_SERIES_LABELS = {
+  KXMLBMENTION:     'MLB',
+  KXNBAMENTION:     'NBA',
+  KXNHLMENTION:     'NHL',
+  KXHANNITYMENTION: 'Hannity',
+  KXTRUMPSAY:       'Trump 7d',
+  KXTRUMPSAYMONTH:  'Trump 30d',
+  KXTRUMPSAYTRUMP:  'Trump brand',
+  KXMRBEASTMENTION: 'MrBeast',
+};
+
+// Common Kalshi strike-suffix codes → readable strike word.
+const MENTION_STRIKE_LABELS = {
+  BULL: 'Bullpen', TRIP: 'Triple', DOUB: 'Double Play', TRAD: 'Trade',
+  CHAL: 'Challenge', NQE: 'NQE', ROBO: 'Robot', WHAT: 'What a Catch',
+  INJU: 'Injury', CROW: 'Crowd', LAR:  "Larry O'Brien", LEGA: 'Legacy',
+  GOAT: 'GOAT', WING: 'Wingspan', ALLE: 'Alley-oop',
+  CROS: 'Crossbar/Post', GLAS: 'Glass', SHOO: 'Shootout',
+  SLEE: 'Sleepy Joe', MELA: 'Melania', BARA: 'Barack',
+  TRAN: 'Transgender', HOTT: 'Hottest', MOG:  'Mog',
+  DISC: 'Discombobulator', GOLD: 'Golden Dome', MARI: 'Marijuana',
+  PERF: 'Perfect Game', BUNT: 'Bunt', OHTA: 'Ohtani', WILD: 'Wild Pitch',
+  PITC: 'Pitch Clock', BASE: 'Bases Loaded', GRAN: 'Grand Slam',
+  WALK: 'Walk Off', PINC: 'Pinch Hitter', MVP:  'MVP', ERRO: 'Error',
+};
+
+function mentionSeriesShort(ticker) {
+  if (!ticker) return '—';
+  const prefix = String(ticker).split('-')[0];
+  return MENTION_SERIES_LABELS[prefix] || prefix.replace(/^KX/,'').replace(/MENTION$/,'');
+}
+
+function mentionEventShort(ticker) {
+  // KXMLBMENTION-26MAY25NYYKC-TRIP → "26MAY25NYYKC"
+  if (!ticker) return '';
+  const parts = String(ticker).split('-');
+  return parts[1] || '';
+}
+
+function mentionStrikeWord(ticker) {
+  if (!ticker) return '—';
+  const parts = String(ticker).split('-');
+  const suffix = parts[parts.length - 1] || '';
+  return MENTION_STRIKE_LABELS[suffix] || suffix;
 }
 
 function unitLabel(r) {
