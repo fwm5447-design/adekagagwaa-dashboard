@@ -17,13 +17,11 @@ import SectionFrame from '../layout/SectionFrame';
  * shrink.  This panel is the operator's view of which cells are
  * being throttled and why.
  *
- *  Skill mapping (from core/decision/skill_score.py):
+ *  Skill mapping (from core/decision/skill_score.py, 2026-05-25 revision):
  *    mae ≤ 1.0°F  → 1.0  (full Kelly)
- *    1-2°F       → 1.0 → 0.5  (linear)
- *    2-3°F       → 0.5 → 0.2
- *    3-5°F       → 0.2 → 0.1
- *    > 5°F       → 0.0  (skip the trade)
- *    unknown / < 3 samples → 0.5 (default cautious)
+ *    1-2°F       → 1.0 → 0.0  (linear taper)
+ *    > 2°F        → 0.0  (skip the trade)
+ *    unknown / < 3 samples → 0.0 (cold cell → skip, was 0.5 half-Kelly)
  */
 export default function ForecastSkill({ rows = [], freshness }) {
   const data = useMemo(() => {
@@ -64,17 +62,17 @@ export default function ForecastSkill({ rows = [], freshness }) {
       id="forecast-skill"
       invocation="Forecast Skill"
       title="Forecast Skill Throttle"
-      subtitle="Per-cell rolling MAE drives a Kelly multiplier on every DTL bet.  Cells where EMOS post-processing is hurting raw forecast accuracy auto-shrink to zero without any operator intervention.  Refreshes every 5 minutes."
+      subtitle="Per-cell rolling 7-day MAE drives a Kelly multiplier on every bet.  Cells with MAE > 2°F skip entirely; cells with MAE ≤ 1°F bet full Kelly; in between is a linear taper.  MAE updates daily from forecasts joined with observations, so paused cells keep accumulating signal and auto-resume once they recover.  Refreshes every 5 minutes."
       freshnessAt={freshness}
       freshnessCadenceSec={300}
     >
       {/* Headline tiles */}
       <div style={S.tileGrid}>
         <Tile label="Cells tracked" value={totals.n_cells.toString()} sub="distinct (city, market) pairs" />
-        <Tile label="Skipped" value={totals.n_zero.toString()} sub="skill = 0 (MAE > 5°F)" tone="bad" />
-        <Tile label="Throttled" value={totals.n_partial.toString()} sub="0 < skill < 1" tone="warn" />
+        <Tile label="Skipped" value={totals.n_zero.toString()} sub="skill = 0 (MAE > 2°F)" tone="bad" />
+        <Tile label="Throttled" value={totals.n_partial.toString()} sub="0 < skill < 1 (1-2°F)" tone="warn" />
         <Tile label="Healthy" value={totals.n_full.toString()} sub="skill = 1.0 (MAE ≤ 1°F)" tone="good" />
-        <Tile label="Default" value={totals.n_default.toString()} sub="< 3 settled samples (skill = 0.5)" />
+        <Tile label="Cold" value={totals.n_default.toString()} sub="< 3 settled samples (skip)" tone="bad" />
       </div>
 
       {/* Table */}
@@ -95,14 +93,14 @@ export default function ForecastSkill({ rows = [], freshness }) {
             {data.length === 0 && (
               <tr>
                 <td colSpan={7} style={S.empty}>
-                  No settled v2 trades yet.  MV populates as trades resolve via the daily settler run.
+                  No cells in mv_forecast_skill yet.  MV populates daily from forecasts joined with canonical observations.
                 </td>
               </tr>
             )}
             {data.map((d) => {
               const isDefault = d.mae_7d === null || d.n_7d < 3;
               const eff = isDefault
-                ? 'default 0.5×'
+                ? 'cold → skip'
                 : d.skill === 0 ? 'SKIP'
                 : d.skill >= 0.99 ? 'full Kelly'
                 : `${(d.skill * 100).toFixed(0)}% Kelly`;
@@ -135,11 +133,12 @@ export default function ForecastSkill({ rows = [], freshness }) {
 
 // ── Pure functions ──────────────────────────────────────────────
 
-/** Mirror of core/decision/skill_score.py skill_score_from_mae(). */
+/** Mirror of core/decision/skill_score.py skill_score_from_mae().
+ *  2026-05-25: curve tightened — anything above 2°F now skips. */
 function skillFromMae(mae) {
-  if (mae === null || mae === undefined) return 0.5;
+  if (mae === null || mae === undefined) return 0.0;
   if (mae <= 0) return 1.0;
-  const points = [[0, 1.0], [1, 1.0], [2, 0.5], [3, 0.2], [5, 0.1]];
+  const points = [[0, 1.0], [1, 1.0], [2, 0.0]];
   for (let i = 1; i < points.length; i++) {
     const [x0, y0] = points[i - 1];
     const [x1, y1] = points[i];

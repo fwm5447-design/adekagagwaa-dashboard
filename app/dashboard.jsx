@@ -183,10 +183,13 @@ export default function Dashboard() {
           freshness={fresh('forecast_vs_settled')}
         />
 
-        {/* 2. Model honesty (calibration deciles) */}
+        {/* 2. Self-correction: which cells trade, which are paused, and
+            the μ-shift being applied to chronically-biased cells.
+            Replaced the empty calibration-deciles view 2026-05-25 — the
+            source MV (mv_calibration_buckets_win) was deleted. */}
         <Oracle
-          rows={sections.calibration || []}
-          freshness={fresh('calibration')}
+          rows={sections.self_correction || []}
+          freshness={fresh('self_correction')}
         />
 
         {/* 3. Four-stage calibration pipeline (sources → EMOS → isotonic → biases) */}
