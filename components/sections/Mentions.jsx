@@ -29,12 +29,16 @@ const STRATEGY_LABELS = {
   hannity_cover_v1:   'Hannity cover',
   brand_launch_v1:    'Brand launch',
   trump_poisson_v1:   'Trump Poisson',
+  trump_wide_no_v1:   'Trump wide-NO',
+  trump_dip_yes_v1:   'Trump dip-YES',
 };
 
 const STRATEGY_ORDER = [
   'nqe_sweep_v1',
   'sports_bandit_v1',
   'trump_recurring_v1',
+  'trump_wide_no_v1',
+  'trump_dip_yes_v1',
   'hannity_cover_v1',
   'brand_launch_v1',
   'trump_poisson_v1',
