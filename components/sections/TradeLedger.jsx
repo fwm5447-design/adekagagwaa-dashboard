@@ -243,34 +243,9 @@ function Row({ r, isOpen, pnlColor, onToggle }) {
       {isOpen && (
         <tr style={{ background: 'var(--ink-mid)' }}>
           <td colSpan={14} style={S.expandCell}>
-            <div style={S.expandGrid}>
-              <Detail label="trade id"           value={r.trade_id} mono />
-              <Detail label="ticker"             value={r.ticker} mono />
-              <Detail label="strike"             value={strikeLong} />
-              <Detail label="grade reason"       value={r.grade_reason} />
-              <Detail label="μ predictive · cal" value={fmtNumeric(r.predictive_mu_cal, 2)} />
-              <Detail label="σ predictive · cal" value={fmtNumeric(r.predictive_sigma_cal, 2)} />
-              <Detail label="p10 – p90"          value={quantileLine} />
-              <Detail label="p50"                value={fmtNumeric(r.predictive_quantile_p50, 2)} />
-              <Detail label="confidence"         value={fmtNumeric(r.confidence, 3)} />
-              <Detail label="intent price"       value={fmtNumeric(r.intent_price, 2)} />
-              <Detail label="CLV · ¢"            value={fmtSignedNumeric(r.clv_cents, 1)} />
-              <Detail label="actual"             value={fmtNumeric(r.actual_value, 2)} />
-              <Detail label="won"                value={r.won == null ? '—' : (r.won ? 'yes' : 'no')} />
-              <Detail label="CRPS · cal"         value={fmtNumeric(r.crps_cal, 4)} />
-              <Detail label="CRPSS"              value={fmtNumeric(r.crps_skill_score, 3)} />
-              <Detail
-                label="50% PI"
-                value={r.in_predictive_50pi == null ? '—' : (r.in_predictive_50pi ? '✓ within' : '× outside')}
-                tone={r.in_predictive_50pi === false ? 'attn' : 'ok'}
-              />
-              <Detail
-                label="90% PI"
-                value={r.in_predictive_90pi == null ? '—' : (r.in_predictive_90pi ? '✓ within' : '× outside')}
-                tone={r.in_predictive_90pi === false ? 'attn' : 'ok'}
-              />
-              <Detail label="settled"            value={fmtTimestampShort(r.settled_at)} />
-            </div>
+            {mention
+              ? renderMentionDetail(r, strikeLong)
+              : renderWeatherDetail(r, strikeLong, quantileLine)}
           </td>
         </tr>
       )}
@@ -317,6 +292,114 @@ function SortHeader({ label, col, sort, onClick, align }) {
         {active && <span style={S.sortArrow}>{sort.dir === 'asc' ? ' ▲' : ' ▼'}</span>}
       </span>
     </th>
+  );
+}
+
+// ── Expand-panel renderers (weather vs mention) ───────────────────
+
+function renderWeatherDetail(r, strikeLong, quantileLine) {
+  return (
+    <div style={S.expandGrid}>
+      <Detail label="trade id"           value={r.trade_id} mono />
+      <Detail label="ticker"             value={r.ticker} mono />
+      <Detail label="strike"             value={strikeLong} />
+      <Detail label="grade reason"       value={r.grade_reason} />
+      <Detail label="μ predictive · cal" value={fmtNumeric(r.predictive_mu_cal, 2)} />
+      <Detail label="σ predictive · cal" value={fmtNumeric(r.predictive_sigma_cal, 2)} />
+      <Detail label="p10 – p90"          value={quantileLine} />
+      <Detail label="p50"                value={fmtNumeric(r.predictive_quantile_p50, 2)} />
+      <Detail label="confidence"         value={fmtNumeric(r.confidence, 3)} />
+      <Detail label="intent price"       value={fmtNumeric(r.intent_price, 2)} />
+      <Detail label="CLV · ¢"            value={fmtSignedNumeric(r.clv_cents, 1)} />
+      <Detail label="actual"             value={fmtNumeric(r.actual_value, 2)} />
+      <Detail label="won"                value={r.won == null ? '—' : (r.won ? 'yes' : 'no')} />
+      <Detail label="CRPS · cal"         value={fmtNumeric(r.crps_cal, 4)} />
+      <Detail label="CRPSS"              value={fmtNumeric(r.crps_skill_score, 3)} />
+      <Detail
+        label="50% PI"
+        value={r.in_predictive_50pi == null ? '—' : (r.in_predictive_50pi ? '✓ within' : '× outside')}
+        tone={r.in_predictive_50pi === false ? 'attn' : 'ok'}
+      />
+      <Detail
+        label="90% PI"
+        value={r.in_predictive_90pi == null ? '—' : (r.in_predictive_90pi ? '✓ within' : '× outside')}
+        tone={r.in_predictive_90pi === false ? 'attn' : 'ok'}
+      />
+      <Detail label="settled"            value={fmtTimestampShort(r.settled_at)} />
+    </div>
+  );
+}
+
+function renderMentionDetail(r, strikeLong) {
+  // Mention trades carry different fields than weather trades.  We surface:
+  //   * Strategy + reasoning (model_p, market_p, edge)
+  //   * Entry economics (entry price, stake, max loss/win)
+  //   * Settlement (settled_at, actual, won, hours-to-settle, PnL)
+  // CRPS / quantile / PI fields are weather-only and omitted here.
+  const ticker = String(r.ticker || r.market_id || '');
+  const ourP = Number(r.our_prob_cal);
+  const mktP = Number(r.market_prob);
+  const edge = (Number.isFinite(ourP) && Number.isFinite(mktP)) ? (ourP - mktP) : null;
+  const entryCents = (Number(r.intent_price) || 0) * 100;
+  const stake = Number(r.intent_size_usd);
+  const maxWin = stake > 0 && entryCents > 0
+    ? (stake * (100 - entryCents) / entryCents)
+    : null;
+  const settled = r.settled_at ? new Date(r.settled_at) : null;
+  const decided = r.decided_at ? new Date(r.decided_at) : null;
+  const hoursToSettle = (settled && decided)
+    ? ((settled.getTime() - decided.getTime()) / 3600000)
+    : null;
+  const won = r.won;
+  const actualV = r.actual_value;
+
+  return (
+    <div style={S.expandGrid}>
+      <Detail label="trade id"             value={r.trade_id} mono />
+      <Detail label="ticker"               value={ticker} mono />
+      <Detail label="strike word"          value={r.strike_word || mentionStrikeWord(ticker)} />
+      <Detail label="strike key"           value={r.strike_key} mono />
+      <Detail label="strategy"             value={r.strategy} mono />
+      <Detail label="side"                 value={r.bet_side}
+              tone={r.bet_side === 'YES' ? 'ok' : 'attn'} />
+
+      <Detail label="entry price"          value={entryCents > 0 ? entryCents.toFixed(1) + '¢' : '—'} />
+      <Detail label="stake"                value={stake > 0 ? '$' + stake.toFixed(2) : '—'} />
+      <Detail label="max win"              value={maxWin != null ? '+$' + maxWin.toFixed(2) : '—'} />
+      <Detail label="max loss"             value={stake > 0 ? '−$' + stake.toFixed(2) : '—'} />
+
+      <Detail label="model P(YES)"         value={Number.isFinite(ourP) ? (100*ourP).toFixed(1) + '%' : '—'} />
+      <Detail label="market P(YES)"        value={Number.isFinite(mktP) ? (100*mktP).toFixed(1) + '%' : '—'} />
+      <Detail
+        label="edge"
+        value={edge != null ? (edge >= 0 ? '+' : '') + (100*edge).toFixed(1) + 'pp' : '—'}
+        tone={edge != null && edge > 0 ? 'ok' : edge != null && edge < 0 ? 'attn' : undefined}
+      />
+
+      <Detail label="decided at"           value={fmtTimestampShort(r.decided_at)} mono />
+      <Detail label="settled at"           value={settled ? fmtTimestampShort(r.settled_at) : '(open)'} mono />
+      <Detail
+        label="hours to settle"
+        value={hoursToSettle != null ? hoursToSettle.toFixed(1) + 'h' : '—'}
+      />
+
+      <Detail
+        label="outcome"
+        value={won == null ? '(pending)' : (won ? '✅ WIN' : '❌ LOSS')}
+        tone={won === true ? 'ok' : won === false ? 'attn' : undefined}
+      />
+      <Detail
+        label="actual value"
+        value={actualV == null ? '—' : (Number(actualV) > 0.5 ? '1 (YES)' : '0 (NO)')}
+      />
+      <Detail
+        label="realized PnL"
+        value={r.pnl == null ? '—' : (Number(r.pnl) >= 0 ? '+$' : '−$') + Math.abs(Number(r.pnl)).toFixed(2)}
+        tone={r.pnl == null ? undefined : Number(r.pnl) > 0 ? 'ok' : 'attn'}
+      />
+
+      <Detail label="status"               value={r.trade_status || 'open'} />
+    </div>
   );
 }
 
