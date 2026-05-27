@@ -24,7 +24,8 @@ import SectionFrame from '../layout/SectionFrame';
 
 const STRATEGY_LABELS = {
   nqe_sweep_v1:       'NQE sweep',
-  sports_bandit_v1:   'Sports bandit',
+  sports_bandit_v1:   'Sports bandit (small)',
+  sports_bandit_v2:   'Sports bandit (big)',
   trump_recurring_v1: 'Trump recurring',
   hannity_cover_v1:   'Hannity cover',
   brand_launch_v1:    'Brand launch',
@@ -36,6 +37,7 @@ const STRATEGY_LABELS = {
 const STRATEGY_ORDER = [
   'nqe_sweep_v1',
   'sports_bandit_v1',
+  'sports_bandit_v2',
   'trump_recurring_v1',
   'trump_wide_no_v1',
   'trump_dip_yes_v1',
