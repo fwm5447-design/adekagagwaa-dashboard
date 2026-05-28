@@ -298,6 +298,15 @@ function SortHeader({ label, col, sort, onClick, align }) {
 // ── Expand-panel renderers (weather vs mention) ───────────────────
 
 function renderWeatherDetail(r, strikeLong, quantileLine) {
+  // Same entry-economics block as mentions (entry price ¢, stake, max
+  // win, max loss) so the two trade types tell a parallel story —
+  // requested 2026-05-28.  Computed from intent_price / intent_size_usd
+  // which both stacks populate.
+  const entryCents = (Number(r.intent_price) || 0) * 100;
+  const stake = Number(r.intent_size_usd);
+  const maxWin = stake > 0 && entryCents > 0
+    ? (stake * (100 - entryCents) / entryCents)
+    : null;
   return (
     <div style={S.expandGrid}>
       <Detail label="trade id"           value={r.trade_id} mono />
@@ -309,7 +318,10 @@ function renderWeatherDetail(r, strikeLong, quantileLine) {
       <Detail label="p10 – p90"          value={quantileLine} />
       <Detail label="p50"                value={fmtNumeric(r.predictive_quantile_p50, 2)} />
       <Detail label="confidence"         value={fmtNumeric(r.confidence, 3)} />
-      <Detail label="intent price"       value={fmtNumeric(r.intent_price, 2)} />
+      <Detail label="entry price"        value={entryCents > 0 ? entryCents.toFixed(1) + '¢' : '—'} />
+      <Detail label="stake"              value={stake > 0 ? '$' + stake.toFixed(2) : '—'} />
+      <Detail label="max win"            value={maxWin != null ? '+$' + maxWin.toFixed(2) : '—'} />
+      <Detail label="max loss"           value={stake > 0 ? '−$' + stake.toFixed(2) : '—'} />
       <Detail label="CLV · ¢"            value={fmtSignedNumeric(r.clv_cents, 1)} />
       <Detail label="actual"             value={fmtNumeric(r.actual_value, 2)} />
       <Detail label="won"                value={r.won == null ? '—' : (r.won ? 'yes' : 'no')} />
